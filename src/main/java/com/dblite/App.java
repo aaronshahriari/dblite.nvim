@@ -18,9 +18,9 @@ public class App {
             System.err.println("Example DB_URL: jdbc:oracle:thin:@//localhost:1521/XEPDB1  or  jdbc:sqlserver://localhost:1433;databaseName=MyDB");
             System.exit(1);
         }
-        boolean integratedAuth = url.toLowerCase().contains("integratedsecurity=true");
-        if (!integratedAuth && (user == null || password == null)) {
-            System.err.println("Missing required env vars: DB_USER, DB_PASSWORD (not required for integratedSecurity=true)");
+        boolean credentialFree = usesCredentialFreeConnection(url);
+        if (!credentialFree && (user == null || password == null)) {
+            System.err.println("Missing required env vars: DB_USER, DB_PASSWORD (not required for SQLite or integratedSecurity=true)");
             System.exit(1);
         }
 
@@ -62,13 +62,11 @@ public class App {
         }
 
         if (scriptMode) {
-            runScript(query, url, user, password, integratedAuth);
+            runScript(query, url, user, password);
             return;
         }
 
-        try (Connection conn = integratedAuth
-                 ? DriverManager.getConnection(url)
-                 : DriverManager.getConnection(url, user, password);
+        try (Connection conn = openConnection(url, user, password);
              Statement stmt = conn.createStatement()) {
 
             if (maxRows > 0) stmt.setMaxRows(maxRows);
@@ -133,9 +131,8 @@ public class App {
     // per-statement log is emitted as JSON. Connection-level failures exit(2)
     // (like the single-statement path); per-statement SQL errors are reported
     // in the JSON with exit(0) so the log still renders.
-    private static void runScript(String script, String url, String user,
-                                  String password, boolean integratedAuth) {
-        java.util.List<String> stmts = splitStatements(script);
+    private static void runScript(String script, String url, String user, String password) {
+        java.util.List<String> stmts = splitStatements(script, url);
         if (stmts.isEmpty()) {
             System.err.println("No statements found in script");
             System.exit(1);
@@ -145,9 +142,7 @@ public class App {
         out.append("{\"script\": true, \"results\": [");
         int executed = 0, failed = 0;
 
-        try (Connection conn = integratedAuth
-                 ? DriverManager.getConnection(url)
-                 : DriverManager.getConnection(url, user, password)) {
+        try (Connection conn = openConnection(url, user, password)) {
 
             for (int idx = 0; idx < stmts.size(); idx++) {
                 String s = stmts.get(idx);
@@ -178,26 +173,40 @@ public class App {
         System.out.println(out);
     }
 
+    static Connection openConnection(String url, String user, String password)
+            throws java.sql.SQLException {
+        return usesCredentialFreeConnection(url)
+            ? DriverManager.getConnection(url)
+            : DriverManager.getConnection(url, user, password);
+    }
+
+    private static boolean usesCredentialFreeConnection(String url) {
+        String lower = url.toLowerCase(java.util.Locale.ROOT);
+        return lower.startsWith("jdbc:sqlite:") || lower.contains("integratedsecurity=true");
+    }
+
     // First ~80 chars of a statement, collapsed to a single line, for the log.
     private static String preview(String s) {
         String one = s.replaceAll("\\s+", " ").trim();
         return one.length() > 80 ? one.substring(0, 80) + "…" : one;
     }
 
-    // Splits a SQL*Plus-style script into individual statements.
-    //   - a line containing only "/" terminates the current statement
+    // Splits a script according to the dialect identified by its JDBC URL.
+    //   - for Oracle, a line containing only "/" terminates the current statement
     //     (the canonical PL/SQL block terminator)
-    //   - ";" terminates a statement UNLESS it is inside a PL/SQL block
-    //     (DECLARE / BEGIN / CREATE PROCEDURE|FUNCTION|PACKAGE|TRIGGER|TYPE),
-    //     where ";" separates inner statements
+    //   - Oracle PL/SQL blocks and SQLite trigger bodies retain inner semicolons
     //   - string literals ('...' with '' escape), quoted identifiers ("..."),
     //     line comments (--) and block comments (/* */) are skipped so their
     //     contents never trigger a split
-    static java.util.List<String> splitStatements(String sql) {
+    static java.util.List<String> splitStatements(String sql, String url) {
         java.util.List<String> out = new java.util.ArrayList<>();
         StringBuilder cur = new StringBuilder();
+        String lowerUrl = url.toLowerCase(java.util.Locale.ROOT);
+        boolean oracle = lowerUrl.startsWith("jdbc:oracle:");
+        boolean sqlite = lowerUrl.startsWith("jdbc:sqlite:");
         int n = sql.length();
-        boolean inSingle = false, inDouble = false, inLine = false, inBlock = false;
+        boolean inSingle = false, inDouble = false, inBacktick = false, inBracket = false;
+        boolean inLine = false, inBlock = false;
         boolean lineBlank = true; // only whitespace seen on the current line so far
         int i = 0;
         while (i < n) {
@@ -224,7 +233,23 @@ public class App {
             }
             if (inDouble) {
                 cur.append(c);
-                if (c == '"') inDouble = false;
+                if (c == '"') {
+                    if (nx == '"') { cur.append(nx); i += 2; continue; }
+                    inDouble = false;
+                }
+                i++; continue;
+            }
+            if (inBacktick) {
+                cur.append(c);
+                if (c == '`') {
+                    if (nx == '`') { cur.append(nx); i += 2; continue; }
+                    inBacktick = false;
+                }
+                i++; continue;
+            }
+            if (inBracket) {
+                cur.append(c);
+                if (c == ']') inBracket = false;
                 i++; continue;
             }
 
@@ -232,12 +257,14 @@ public class App {
             if (c == '/' && nx == '*') { inBlock = true; cur.append(c); i++; lineBlank = false; continue; }
             if (c == '\'') { inSingle = true; cur.append(c); i++; lineBlank = false; continue; }
             if (c == '"') { inDouble = true; cur.append(c); i++; lineBlank = false; continue; }
+            if (sqlite && c == '`') { inBacktick = true; cur.append(c); i++; lineBlank = false; continue; }
+            if (sqlite && c == '[') { inBracket = true; cur.append(c); i++; lineBlank = false; continue; }
 
             if (c == '\n') { cur.append(c); lineBlank = true; i++; continue; }
             if (c == '\r') { cur.append(c); i++; continue; }
 
             // lone "/" on its own line -> terminate current statement
-            if (c == '/' && lineBlank) {
+            if (oracle && c == '/' && lineBlank) {
                 int j = i + 1;
                 boolean rest = true;
                 while (j < n) {
@@ -254,9 +281,14 @@ public class App {
                 }
             }
 
-            if (c == ';' && !isPlsqlBlock(cur)) {
-                flush(out, cur);
-                i++; lineBlank = false; continue;
+            if (c == ';') {
+                boolean terminate = sqlite
+                    ? !isSqliteTrigger(cur) || isSqliteTriggerComplete(cur)
+                    : !isPlsqlBlock(cur);
+                if (terminate) {
+                    flush(out, cur);
+                    i++; lineBlank = false; continue;
+                }
             }
 
             cur.append(c);
@@ -302,6 +334,72 @@ public class App {
             }
         }
         return false;
+    }
+
+    private static boolean isSqliteTrigger(CharSequence csq) {
+        java.util.List<String> words = sqlWords(csq);
+        if (words.isEmpty() || !"CREATE".equals(words.get(0))) return false;
+        int i = 1;
+        if (i < words.size() && ("TEMP".equals(words.get(i)) || "TEMPORARY".equals(words.get(i)))) i++;
+        return i < words.size() && "TRIGGER".equals(words.get(i));
+    }
+
+    private static boolean isSqliteTriggerComplete(CharSequence csq) {
+        java.util.List<String> words = sqlWords(csq);
+        boolean inBody = false;
+        int caseDepth = 0;
+        String last = null;
+        for (String word : words) {
+            if (!inBody) {
+                if ("BEGIN".equals(word)) inBody = true;
+                continue;
+            }
+            if ("CASE".equals(word)) {
+                caseDepth++;
+            } else if ("END".equals(word)) {
+                if (caseDepth > 0) caseDepth--;
+                else last = "END";
+            } else {
+                last = word;
+            }
+        }
+        return inBody && caseDepth == 0 && "END".equals(last);
+    }
+
+    private static java.util.List<String> sqlWords(CharSequence csq) {
+        java.util.List<String> words = new java.util.ArrayList<>();
+        int i = 0, n = csq.length();
+        while (i < n) {
+            char c = csq.charAt(i);
+            char nx = i + 1 < n ? csq.charAt(i + 1) : '\0';
+            if (c == '-' && nx == '-') {
+                i += 2;
+                while (i < n && csq.charAt(i) != '\n') i++;
+            } else if (c == '/' && nx == '*') {
+                i += 2;
+                while (i + 1 < n && !(csq.charAt(i) == '*' && csq.charAt(i + 1) == '/')) i++;
+                i = Math.min(i + 2, n);
+            } else if (c == '\'' || c == '"' || c == '`') {
+                char quote = c;
+                i++;
+                while (i < n) {
+                    if (csq.charAt(i) == quote) {
+                        if (i + 1 < n && csq.charAt(i + 1) == quote) i += 2;
+                        else { i++; break; }
+                    } else i++;
+                }
+            } else if (c == '[') {
+                i++;
+                while (i < n && csq.charAt(i++) != ']') { }
+            } else if (Character.isLetter(c) || c == '_') {
+                int start = i++;
+                while (i < n && (Character.isLetterOrDigit(csq.charAt(i)) || csq.charAt(i) == '_')) i++;
+                words.add(csq.subSequence(start, i).toString().toUpperCase(java.util.Locale.ROOT));
+            } else {
+                i++;
+            }
+        }
+        return words;
     }
 
     private static boolean startsWithWord(String s, String w) {
@@ -368,9 +466,8 @@ public class App {
     // Plain (un-quoted) string form of a cell, for CSV output.
     private static String csvValue(ResultSet rs, int col, int sqlType) throws java.sql.SQLException {
         if (sqlType == Types.BLOB) {
-            java.sql.Blob blob = rs.getBlob(col);
-            if (blob == null || rs.wasNull()) return "";
-            return "<BLOB " + blob.length() + " bytes>";
+            Long length = blobLength(rs, col);
+            return length == null ? "" : "<BLOB " + length + " bytes>";
         }
         if (sqlType == Types.CLOB || sqlType == Types.NCLOB) {
             java.sql.Clob clob = rs.getClob(col);
@@ -393,11 +490,10 @@ public class App {
         return s;
     }
 
-    private static String formatValue(ResultSet rs, int col, int sqlType) throws java.sql.SQLException {
+    static String formatValue(ResultSet rs, int col, int sqlType) throws java.sql.SQLException {
         if (sqlType == Types.BLOB) {
-            java.sql.Blob blob = rs.getBlob(col);
-            if (blob == null || rs.wasNull()) return "null";
-            return "\"<BLOB " + blob.length() + " bytes>\"";
+            Long length = blobLength(rs, col);
+            return length == null ? "null" : "\"<BLOB " + length + " bytes>\"";
         }
         if (sqlType == Types.CLOB || sqlType == Types.NCLOB) {
             java.sql.Clob clob = rs.getClob(col);
@@ -421,9 +517,30 @@ public class App {
             case Types.DOUBLE:
             case Types.NUMERIC:
             case Types.DECIMAL:
-                return raw;
+                return isJsonNumber(raw) ? raw : "\"" + escape(raw) + "\"";
             default:
                 return "\"" + escape(raw) + "\"";
+        }
+    }
+
+    private static boolean isJsonNumber(String value) {
+        return value.matches("-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?");
+    }
+
+    private static Long blobLength(ResultSet rs, int col) throws java.sql.SQLException {
+        String url = rs.getStatement().getConnection().getMetaData().getURL();
+        if (!url.toLowerCase(java.util.Locale.ROOT).startsWith("jdbc:sqlite:")) {
+            java.sql.Blob blob = rs.getBlob(col);
+            return blob == null || rs.wasNull() ? null : blob.length();
+        }
+        try (java.io.InputStream input = rs.getBinaryStream(col)) {
+            if (input == null || rs.wasNull()) return null;
+            long length = 0;
+            byte[] buffer = new byte[8192];
+            for (int read; (read = input.read(buffer)) >= 0;) length += read;
+            return length;
+        } catch (java.io.IOException e) {
+            throw new java.sql.SQLException("Failed to read BLOB", e);
         }
     }
 

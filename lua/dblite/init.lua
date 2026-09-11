@@ -762,7 +762,7 @@ local function execute_core(query, script)
 
   local c = state.active_conn
   local sys_env = { DB_URL = connections.jdbc_url(c) }
-  if c.auth ~= "kerberos" then
+  if c.type ~= "sqlite" and c.auth ~= "kerberos" then
     sys_env.DB_USER     = expand_env(c.user)
     sys_env.DB_PASSWORD = expand_env(c.password or "")
   end
@@ -1006,7 +1006,7 @@ function M.run_async(format, path, range)
 
   local c = state.active_conn
   local sys_env = { DB_URL = connections.jdbc_url(c) }
-  if c.auth ~= "kerberos" then
+  if c.type ~= "sqlite" and c.auth ~= "kerberos" then
     sys_env.DB_USER     = expand_env(c.user)
     sys_env.DB_PASSWORD = expand_env(c.password or "")
   end
@@ -1134,6 +1134,26 @@ local function edit_conn_by_name(name)
     return v ~= "" and v or current
   end
 
+  if conn.type == "sqlite" then
+    local updates = {
+      name = prompt("Name", conn.name),
+      path = prompt("Path", conn.path),
+    }
+    local ok, result = pcall(connections.update, conn.id, updates)
+    if not ok then
+      vim.notify("\ndblite: " .. tostring(result), vim.log.levels.ERROR)
+      return
+    end
+    require("dblite.schema").invalidate(conn.id)
+    if state.active_conn and state.active_conn.id == conn.id then
+      state.active_conn = result
+      require("dblite.schema").prefetch(result)
+    end
+    vim.notify("\ndblite: updated '" .. updates.name .. "'", vim.log.levels.INFO)
+    panel.refresh()
+    return
+  end
+
   local default_port = conn.type == "sqlserver" and 1433 or 1521
   local db_label     = conn.type == "sqlserver" and "Database" or "Service"
   local db_current   = conn.type == "sqlserver" and conn.database or conn.service
@@ -1159,6 +1179,7 @@ local function edit_conn_by_name(name)
     return
   end
   if state.active_conn and state.active_conn.id == conn.id then
+    require("dblite.schema").invalidate(conn.id)
     state.active_conn = connections.get(conn.id)
     if state.active_conn then require("dblite.schema").prefetch(state.active_conn) end
   end
@@ -1194,7 +1215,7 @@ vim.api.nvim_create_user_command("DbliteConnPicker", function()
 end, {})
 
 -- :DbliteAddConn — interactive; optionally accepts a URI as first argument
--- URI format: oracle://user[:pass]@host[:port]/service  OR  sqlserver://user[:pass]@host[:port]/database
+-- URI formats include oracle://..., sqlserver://..., and sqlite:///absolute/path.
 vim.api.nvim_create_user_command("DbliteAddConn", function(opts)
   local fields
 
@@ -1207,7 +1228,7 @@ vim.api.nvim_create_user_command("DbliteAddConn", function(opts)
     fields = parsed
   else
     -- Ask for URI first; blank means fall through to field-by-field
-    local uri_input = vim.fn.input("URI (oracle://... or sqlserver://...) or blank for manual: ")
+    local uri_input = vim.fn.input("URI (oracle://..., sqlserver://..., or sqlite://...) or blank for manual: ")
     if uri_input ~= "" then
       local parsed, err = connections.parse_uri(uri_input)
       if not parsed then
@@ -1222,37 +1243,43 @@ vim.api.nvim_create_user_command("DbliteAddConn", function(opts)
   if name == "" then return end
 
   if not fields then
-    local type_s = vim.fn.input("Type [oracle/sqlserver]: ")
+    local type_s = vim.fn.input("Type [oracle/sqlserver/sqlite]: ")
     type_s = type_s ~= "" and type_s or "oracle"
-    if type_s ~= "oracle" and type_s ~= "sqlserver" then
-      vim.notify("\ndblite: type must be 'oracle' or 'sqlserver'", vim.log.levels.ERROR)
+    if type_s ~= "oracle" and type_s ~= "sqlserver" and type_s ~= "sqlite" then
+      vim.notify("\ndblite: type must be 'oracle', 'sqlserver', or 'sqlite'", vim.log.levels.ERROR)
       return
     end
-    local default_port = type_s == "sqlserver" and "1433" or "1521"
-    local host = vim.fn.input("Host: ")
-    if host == "" then return end
-    local port_s   = vim.fn.input("Port [" .. default_port .. "]: ")
-    local db_label = type_s == "sqlserver" and "Database" or "Service"
-    local db_val   = vim.fn.input(db_label .. ": ")
-    if db_val == "" then return end
-    local user     = vim.fn.input("User: ")
-    if user == "" then return end
-    local password = vim.fn.inputsecret("Password (or $ENV_VAR): ")
-    fields = {
-      type     = type_s,
-      host     = host,
-      port     = tonumber(port_s ~= "" and port_s or default_port),
-      user     = user,
-      password = password,
-    }
-    if type_s == "sqlserver" then
-      fields.database = db_val
+    if type_s == "sqlite" then
+      local path = vim.fn.input("Database path: ", "", "file")
+      if path == "" then return end
+      fields = { type = type_s, path = path }
     else
-      fields.service = db_val
+      local default_port = type_s == "sqlserver" and "1433" or "1521"
+      local host = vim.fn.input("Host: ")
+      if host == "" then return end
+      local port_s   = vim.fn.input("Port [" .. default_port .. "]: ")
+      local db_label = type_s == "sqlserver" and "Database" or "Service"
+      local db_val   = vim.fn.input(db_label .. ": ")
+      if db_val == "" then return end
+      local user     = vim.fn.input("User: ")
+      if user == "" then return end
+      local password = vim.fn.inputsecret("Password (or $ENV_VAR): ")
+      fields = {
+        type     = type_s,
+        host     = host,
+        port     = tonumber(port_s ~= "" and port_s or default_port),
+        user     = user,
+        password = password,
+      }
+      if type_s == "sqlserver" then
+        fields.database = db_val
+      else
+        fields.service = db_val
+      end
     end
   else
     -- URI path: password may be missing — give the user a chance to set it
-    if (fields.password or "") == "" then
+    if fields.type ~= "sqlite" and (fields.password or "") == "" then
       fields.password = vim.fn.inputsecret("Password (or $ENV_VAR, leave blank to set later): ")
     end
   end
@@ -1277,12 +1304,17 @@ vim.api.nvim_create_user_command("DbliteListConns", function()
   local lines = { "dblite connections:" }
   for _, c in ipairs(conns) do
     local active  = (state.active_conn and state.active_conn.id == c.id) and " *" or ""
-    local db_val  = (c.type == "sqlserver") and c.database or c.service
-    local default_port = (c.type == "sqlserver") and 1433 or 1521
-    table.insert(lines, string.format(
-      "  %-20s  [%-10s]  %s@%s:%d/%s%s",
-      c.name, c.type or "oracle", c.user, c.host, c.port or default_port, db_val or "?", active
-    ))
+    if c.type == "sqlite" then
+      table.insert(lines, string.format("  %-20s  [%-10s]  %s%s",
+        c.name, c.type, c.path or "?", active))
+    else
+      local db_val  = (c.type == "sqlserver") and c.database or c.service
+      local default_port = (c.type == "sqlserver") and 1433 or 1521
+      table.insert(lines, string.format(
+        "  %-20s  [%-10s]  %s@%s:%d/%s%s",
+        c.name, c.type or "oracle", c.user, c.host, c.port or default_port, db_val or "?", active
+      ))
+    end
   end
   vim.notify(table.concat(lines, "\n"), vim.log.levels.INFO)
 end, {})
@@ -1756,7 +1788,7 @@ function M.load(opts)
     return
   end
 
-  local built = load_mod.build(control, records)
+  local built = load_mod.build(control, records, state.active_conn.type or "oracle")
   if built.count == 0 then
     local msg = "dblite: nothing to load from " .. path
     if #built.errors > 0 then msg = msg .. " — " .. built.errors[1] end
@@ -1880,6 +1912,7 @@ function M.edit_connections_file()
         local updated = connections.get(state.active_conn.id)
         if updated then
           state.active_conn = updated
+          require("dblite.schema").invalidate(updated.id)
           require("dblite.schema").prefetch(updated)
         end
       end
@@ -1907,7 +1940,7 @@ do
     end,
     conn          = function(a)
       local sub = a[2]
-      if     sub == "add"  then vim.cmd("DbliteAddConn "  .. (a[3] or ""))
+      if     sub == "add"  then vim.cmd("DbliteAddConn " .. table.concat(vim.list_slice(a, 3), " "))
       elseif sub == "list" then vim.cmd("DbliteListConns")
       elseif sub == "use"  then vim.cmd("DbliteUseConn "  .. (a[3] or ""))
       elseif sub == "edit" then vim.cmd("DbliteEditConn " .. (a[3] or ""))
@@ -1958,6 +1991,11 @@ do
   end
 
   vim.api.nvim_create_user_command("Dblite", function(opts)
+    local add_uri = opts.args:match("^conn%s+add%s+(.+)$")
+    if add_uri then
+      vim.cmd("DbliteAddConn " .. add_uri)
+      return
+    end
     local args = vim.split(opts.args, "%s+")
     local range = (opts.range and opts.range > 0) and { line1 = opts.line1, line2 = opts.line2 } or nil
     local fn = dispatch[args[1]]

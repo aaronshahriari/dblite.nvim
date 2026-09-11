@@ -34,6 +34,15 @@ jobs:
       - name: Build native binary
         run: mvn -q clean package -Pnative
 
+      - name: Smoke test SQLite
+        shell: bash
+        run: |
+          db="$RUNNER_TEMP/dblite-smoke.sqlite"
+          DB_URL="jdbc:sqlite:$db" bin/dblite <<<'CREATE TABLE smoke (answer INTEGER)'
+          DB_URL="jdbc:sqlite:$db" bin/dblite <<<'INSERT INTO smoke VALUES (42)'
+          output=$(DB_URL="jdbc:sqlite:$db" bin/dblite <<<'SELECT answer FROM smoke')
+          [[ "$output" == *'"answer": 42'* ]]
+
       - name: Stage release asset
         run: cp bin/dblite dblite-${{ matrix.target }}
 

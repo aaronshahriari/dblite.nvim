@@ -7,6 +7,7 @@ local _cache = {}
 -- Returns owner, table, column, type per row.
 -- Oracle: all_tab_columns filtered to non-system schemas.
 -- SQL Server: INFORMATION_SCHEMA.COLUMNS with schema as owner.
+-- SQLite: main schema tables/views joined to pragma_table_xinfo.
 local ORACLE_SQL = [[
 SELECT c.owner, c.table_name, c.column_name, c.data_type
 FROM all_tab_columns c
@@ -20,6 +21,15 @@ SELECT c.TABLE_SCHEMA AS owner, c.TABLE_NAME AS table_name,
        c.COLUMN_NAME AS column_name, c.DATA_TYPE AS data_type
 FROM INFORMATION_SCHEMA.COLUMNS c
 ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION]]
+
+local SQLITE_SQL = [[
+SELECT 'main' AS owner, m.name AS table_name,
+       p.name AS column_name, p.type AS data_type
+FROM sqlite_schema m
+JOIN pragma_table_xinfo(m.name) p
+WHERE m.type IN ('table', 'view')
+AND m.name NOT LIKE 'sqlite_%'
+ORDER BY m.name, p.cid]]
 
 local function expand_env(s)
   if type(s) == "string" and s:sub(1, 1) == "$" then
@@ -76,19 +86,20 @@ function M.get(conn, callback)
 
   _cache[id] = { fetching = true, cbs = { callback } }
 
-  local sql = (conn.type == "sqlserver") and MSSQL_SQL or ORACLE_SQL
+  local sql = conn.type == "sqlserver" and MSSQL_SQL
+    or conn.type == "sqlite" and SQLITE_SQL
+    or ORACLE_SQL
+  local env = { DB_URL = connections.jdbc_url(conn) }
+  if conn.type ~= "sqlite" and conn.auth ~= "kerberos" then
+    env.DB_USER = expand_env(conn.user)
+    env.DB_PASSWORD = expand_env(conn.password or "")
+  end
   vim.system(
     { config.binary },
     {
       stdin = sql,
       text  = true,
-      env   = conn.auth == "kerberos"
-        and { DB_URL = connections.jdbc_url(conn) }
-        or  {
-          DB_URL      = connections.jdbc_url(conn),
-          DB_USER     = expand_env(conn.user),
-          DB_PASSWORD = expand_env(conn.password or ""),
-        },
+      env   = env,
     },
     function(result)
       vim.schedule(function()

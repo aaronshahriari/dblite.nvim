@@ -38,11 +38,32 @@ local KIND = {
   Keyword  = 14,
 }
 
--- Scan the buffer for FROM/JOIN owner.table [AS] [alias] references.
+local function insert_identifier(conn, name)
+  if conn.type ~= "sqlite" then return name end
+  return '"' .. name:gsub('"', '""') .. '"'
+end
+
+local function ci_key(tbl, wanted)
+  if tbl[wanted] ~= nil then return wanted end
+  wanted = wanted:upper()
+  for key in pairs(tbl) do
+    if type(key) == "string" and key:upper() == wanted then return key end
+  end
+end
+
+local function resolve_fqn(sch, owner, tname)
+  local owner_key = ci_key(sch.owner_tables, owner)
+  if not owner_key then return end
+  for _, candidate in ipairs(sch.owner_tables[owner_key]) do
+    if candidate:upper() == tname:upper() then return owner_key .. "." .. candidate end
+  end
+end
+
+-- Scan the buffer for FROM/JOIN [owner.]table [AS] [alias] references.
 -- Returns:
 --   qcols   — deduplicated columns from all referenced tables, [{name, type, src}]
 --   fqn_map — {TNAME_OR_ALIAS_UPPER -> "OWNER.TABLE"} for dot-completion lookups
-local function query_context(bufnr, sch)
+local function query_context(bufnr, sch, unqualified_owner)
   local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
   local text  = table.concat(lines, " ")
 
@@ -51,7 +72,8 @@ local function query_context(bufnr, sch)
   local fqn_map  = {}
 
   local function add_fqn(owner, tname, alias)
-    local fqn = owner:upper() .. "." .. tname:upper()
+    local fqn = resolve_fqn(sch, owner, tname)
+    if not fqn then return end
     fqn_map[tname:upper()] = fqn
     if alias then fqn_map[alias:upper()] = fqn end
     local tbl_cols = sch.columns[fqn]
@@ -82,6 +104,27 @@ local function query_context(bufnr, sch)
         kw_pat .. "%s+([%w_]+)%.([%w_]+)%s+([%w_]+)") do
       if not CLAUSE_WORDS[alias:upper()] then
         add_fqn(owner, tname, alias)
+      end
+    end
+    if unqualified_owner then
+      -- SQLite normally uses unqualified table names.
+      for tname, alias in text:gmatch(kw_pat .. "%s+([%w_]+)%s+[Aa][Ss]%s+([%w_]+)") do
+        add_fqn(unqualified_owner, tname, alias)
+      end
+      for tname, alias in text:gmatch(kw_pat .. "%s+([%w_]+)%s+([%w_]+)") do
+        if not CLAUSE_WORDS[alias:upper()] then add_fqn(unqualified_owner, tname, alias) end
+      end
+      for tname in text:gmatch(kw_pat .. "%s+([%w_]+)") do
+        add_fqn(unqualified_owner, tname, nil)
+      end
+      for tname, alias in text:gmatch(kw_pat .. '%s+"([^"]+)"%s+[Aa][Ss]%s+([%w_]+)') do
+        add_fqn(unqualified_owner, tname, alias)
+      end
+      for tname, alias in text:gmatch(kw_pat .. '%s+"([^"]+)"%s+([%w_]+)') do
+        if not CLAUSE_WORDS[alias:upper()] then add_fqn(unqualified_owner, tname, alias) end
+      end
+      for tname in text:gmatch(kw_pat .. '%s+"([^"]+)"') do
+        add_fqn(unqualified_owner, tname, nil)
       end
     end
   end
@@ -215,17 +258,25 @@ function source:get_completions(ctx, callback)
   end
 
   -- Build query-context columns and alias map from the current buffer.
-  local qcols, fqn_map = query_context(ctx.bufnr, sch)
+  local qcols, fqn_map = query_context(ctx.bufnr, sch, conn.type == "sqlite" and "main" or nil)
 
   -- ── owner.table. — column completions (explicit two-level dot) ───────
   local dot2_owner, dot2_table = line:match("([%w_]+)%.([%w_]+)%.$")
+  if not dot2_owner then
+    dot2_owner, dot2_table = line:match('([%w_]+)%."([^"]+)"%.$')
+  end
   if dot2_owner then
-    local fqn  = dot2_owner:upper() .. "." .. dot2_table:upper()
-    local cols = sch.columns[fqn]
+    local fqn  = resolve_fqn(sch, dot2_owner, dot2_table)
+    local cols = fqn and sch.columns[fqn]
     local items = {}
     if cols then
       for _, col in ipairs(cols) do
-        table.insert(items, { label = col.name, kind = KIND.Field, detail = col.type })
+        table.insert(items, {
+          label = col.name,
+          kind = KIND.Field,
+          detail = col.type,
+          insertText = insert_identifier(conn, col.name),
+        })
       end
     end
     if #items == 0 then items = kw_items end
@@ -234,16 +285,22 @@ function source:get_completions(ctx, callback)
   end
 
   -- ── word. — owner (→ tables) OR table/alias (→ columns) ─────────────
-  local after_dot = line:match("([%w_]+)%.$")
+  local after_dot = line:match("([%w_]+)%.$") or line:match('"([^"]+)"%.$')
   if after_dot then
     local upper = after_dot:upper()
 
     -- Is it an owner/schema?
-    local owner_tables = sch.owner_tables[upper]
+    local owner_key = ci_key(sch.owner_tables, upper)
+    local owner_tables = owner_key and sch.owner_tables[owner_key]
     if owner_tables then
       local items = {}
       for _, tname in ipairs(owner_tables) do
-        table.insert(items, { label = tname, kind = KIND.Class, detail = upper })
+        table.insert(items, {
+          label = tname,
+          kind = KIND.Class,
+          detail = owner_key,
+          insertText = insert_identifier(conn, tname),
+        })
       end
       callback({ is_incomplete_forward = false, is_incomplete_backward = false, items = items })
       return
@@ -256,7 +313,12 @@ function source:get_completions(ctx, callback)
       if cols then
         local items = {}
         for _, col in ipairs(cols) do
-          table.insert(items, { label = col.name, kind = KIND.Field, detail = col.type })
+          table.insert(items, {
+            label = col.name,
+            kind = KIND.Field,
+            detail = col.type,
+            insertText = insert_identifier(conn, col.name),
+          })
         end
         callback({ is_incomplete_forward = false, is_incomplete_backward = false, items = items })
         return
@@ -267,15 +329,26 @@ function source:get_completions(ctx, callback)
   end
 
   -- ── after FROM / JOIN / INTO / UPDATE — owner names first ────────────
-  local after_kw = line:match("[Ff][Rr][Oo][Mm]%s+$")
-                or line:match("[Jj][Oo][Ii][Nn]%s+$")
-                or line:match("[Ii][Nn][Tt][Oo]%s+$")
-                or line:match("[Uu][Pp][Dd][Aa][Tt][Ee]%s+$")
+  local after_kw = line:match('[Ff][Rr][Oo][Mm]%s+["%w_]*$')
+                or line:match('[Jj][Oo][Ii][Nn]%s+["%w_]*$')
+                or line:match('[Ii][Nn][Tt][Oo]%s+["%w_]*$')
+                or line:match('[Uu][Pp][Dd][Aa][Tt][Ee]%s+["%w_]*$')
   if after_kw then
     local items = {}
-    for _, o in ipairs(sch.owners) do
-      local n = sch.owner_tables[o] and #sch.owner_tables[o] or 0
-      table.insert(items, { label = o, kind = KIND.Module, detail = n .. " tables" })
+    if conn.type == "sqlite" then
+      for _, tname in ipairs(sch.owner_tables.main or {}) do
+        table.insert(items, {
+          label = tname,
+          kind = KIND.Class,
+          detail = "main",
+          insertText = '"' .. tname:gsub('"', '""') .. '"',
+        })
+      end
+    else
+      for _, o in ipairs(sch.owners) do
+        local n = sch.owner_tables[o] and #sch.owner_tables[o] or 0
+        table.insert(items, { label = o, kind = KIND.Module, detail = n .. " tables" })
+      end
     end
     vim.list_extend(items, kw_items)
     callback({ is_incomplete_forward = false, is_incomplete_backward = false, items = items })
@@ -297,6 +370,7 @@ function source:get_completions(ctx, callback)
         label        = col.name,
         kind         = KIND.Field,
         detail       = col.type .. "  " .. col.src,
+        insertText   = insert_identifier(conn, col.name),
         score_offset = 5,
       })
     end
@@ -312,6 +386,7 @@ function source:get_completions(ctx, callback)
       label        = col.name,
       kind         = KIND.Field,
       detail       = col.type .. "  " .. col.src,
+      insertText   = insert_identifier(conn, col.name),
       score_offset = 3,
     })
   end

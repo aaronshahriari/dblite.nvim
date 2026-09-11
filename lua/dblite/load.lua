@@ -201,14 +201,15 @@ end
 
 -- Build INSERT statements from parsed control + CSV records.
 -- Returns { sql, statements = {...}, count, skipped, errors = {...} }.
-function M.build(control, records)
+function M.build(control, records, db_type)
   local cols    = control.columns
   local ncols   = #cols
   local collist = table.concat(cols, ", ")
   local stmts, errors = {}, {}
 
   if control.mode == "truncate" then
-    stmts[#stmts + 1] = "TRUNCATE TABLE " .. control.table .. ";"
+    local verb = db_type == "sqlite" and "DELETE FROM " or "TRUNCATE TABLE "
+    stmts[#stmts + 1] = verb .. control.table .. ";"
   elseif control.mode == "replace" then
     stmts[#stmts + 1] = "DELETE FROM " .. control.table .. ";"
   end

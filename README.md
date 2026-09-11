@@ -4,7 +4,7 @@
 
 # dblite.nvim
 
-Query **Oracle** and **SQL Server** from Neovim — write SQL in any buffer, run it, and page results in a split.
+Query **Oracle**, **SQL Server**, and **SQLite** from Neovim — write SQL in any buffer, run it, and page results in a split.
 
 ![Neovim 0.11+](https://img.shields.io/badge/Neovim-0.11+-4c566a?style=flat-square&logo=neovim&logoColor=white)
 ![GraalVM native](https://img.shields.io/badge/GraalVM-native%20·%20no%20JVM-4c566a?style=flat-square)
@@ -114,6 +114,12 @@ For a manual install, add the directory to `runtimepath`, call `require('dblite'
 :DbliteUseConn XEPDB1                                          " make it active
 ```
 
+For SQLite, point the URI at an existing database file:
+
+```vim
+:DbliteAddConn sqlite:///absolute/path.db
+```
+
 Then write SQL in any buffer and run it:
 
 ```vim
@@ -144,7 +150,10 @@ Name arguments support tab-completion.
 ```
 oracle://user[:password]@host[:port]/service
 sqlserver://user[:password]@host[:port]/database
+sqlite:///absolute/path.db
 ```
+
+SQLite paths must point to an existing regular file. `:memory:` is unsupported because each command starts a new process and database connection. Run `:DbliteAddConn` without an argument to enter a URI interactively; leave that prompt blank for field-by-field setup (SQLite asks for type and database path). URI setup still prompts for a connection name.
 
 SQL Server connections use `encrypt=true;trustServerCertificate=true` for broad compatibility with local dev and Azure SQL.
 
@@ -274,7 +283,7 @@ In the preview buffer, press `<CR>` to commit — the `INSERT`s run through scri
 | Control clause | Behaviour |
 |---|---|
 | `INFILE 'path'` | CSV path — relative to cwd, `~` and `$ENV_VAR` expanded (`INFILE *` unsupported) |
-| `INTO TABLE name` | Target table; optional `APPEND` (default), `REPLACE` (DELETE first), or `TRUNCATE` |
+| `INTO TABLE name` | Target table; optional `APPEND` (default), `REPLACE` (DELETE first), or `TRUNCATE` (`DELETE FROM` on SQLite) |
 | `SKIP n` | Skip the first `n` rows (e.g. a header) |
 | `FIELDS TERMINATED BY 'c'` | Field separator (default `,`; also `X'09'` hex, e.g. tab) |
 | `(OPTIONALLY) ENCLOSED BY 'c'` | Quote character (default `"`) |
@@ -342,7 +351,7 @@ sources = {
 | After `:` | existing `dblite.binds.json` keys + columns as bind suggestions |
 | Inside `dblite.binds.json` | dotted column keys like `orders.id` |
 
-Schema is fetched once per connection switch in the background, then served from cache. It uses whatever connection `:DbliteUseConn` set — no extra config.
+Schema is fetched once per connection switch in the background, then served from cache. It uses whatever connection `:DbliteUseConn` set — no extra config. For SQLite, completion covers tables and views in the `main` schema.
 
 </details>
 
@@ -600,10 +609,6 @@ Managing attachment yourself? `require('dblite').attach(bufnr)` applies the conf
 </details>
 
 Full reference is also available in `:help dblite`.
-
-## Roadmap
-
-- MySQL support
 
 ## License
 
