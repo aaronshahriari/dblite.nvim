@@ -1,4 +1,4 @@
-*dblite.txt*	Query Oracle and SQL Server databases from Neovim
+*dblite.txt*	Query Oracle, SQL Server, and SQLite databases from Neovim
 
 Author:  Aaron Shahriari
 License: see repository
@@ -33,7 +33,7 @@ results in a split. It manages named connections (with environment-variable
 support for credentials), navigates a history of past results, substitutes
 bind parameters, and offers context-aware SQL completion via blink.cmp.
 
-Supported databases: Oracle and SQL Server.
+Supported databases: Oracle, SQL Server, and SQLite.
 
 Queries are executed by a native helper binary (`dblite`) that ships with the
 plugin or is downloaded from GitHub Releases. Queries run asynchronously, so
@@ -94,6 +94,7 @@ of options is optional; see |dblite-config|.
 
 	1. Add a connection:
 	   `:DbliteAddConn oracle://system:oracle@localhost:1521/XEPDB1`
+	   For SQLite: `:DbliteAddConn sqlite:///absolute/path.db`
 
 	2. Make it active:
 	   `:DbliteUseConn <name>`  (or pick it in the panel, |dblite-panel|)
@@ -123,10 +124,18 @@ URI formats ~
 >
 	oracle://user[:password]@host[:port]/service
 	sqlserver://user[:password]@host[:port]/database
+	sqlite:///absolute/path.db
 <
 Port defaults to 1521 for Oracle and 1433 for SQL Server when omitted.
 SQL Server connections use `encrypt=true;trustServerCertificate=true` for
 broad compatibility with local dev and Azure SQL.
+
+SQLite paths must point to an existing regular file. `:memory:` is unsupported
+because each command starts a new process and database connection.
+
+With no argument, |:DbliteAddConn| first prompts for a URI. Leave it blank for
+field-by-field setup; SQLite then asks for the type and database path. URI
+setup still prompts for a connection name.
 
 You can also edit the raw JSON directly with `:Dblite conn file`. Saving the
 file refreshes the panel and re-prefetches the active connection's schema.
@@ -223,7 +232,8 @@ configurable via `keymaps.load`; the window style via `load_view`.
 This is an emulation, not real sqlldr (the binary has no Oracle client): a
 practical subset of the control syntax is turned into INSERTs. Supported:
 `INFILE 'path'` (relative to cwd, ~/$ENV expanded), `INTO TABLE name` with an
-optional `APPEND` (default) / `REPLACE` (DELETE first) / `TRUNCATE` mode,
+optional `APPEND` (default) / `REPLACE` (DELETE first) / `TRUNCATE` mode
+(`TRUNCATE` uses DELETE FROM on SQLite),
 `SKIP n`, `FIELDS TERMINATED BY 'c'` (also `X'09'` hex, e.g. tab), `(OPTIONALLY)
 ENCLOSED BY 'c'` (default `"`), `TRAILING NULLCOLS`, and a `(col, ...)` list.
 Values are typed best-effort: numbers unquoted, empty fields become NULL,
@@ -385,7 +395,8 @@ What gets completed ~
 
 Schema is fetched once per connection switch in the background, so subsequent
 completions are instant from cache. The source uses the active connection set
-by |:DbliteUseConn|.
+by |:DbliteUseConn|. For SQLite, completion covers tables and views in the
+`main` schema.
 
 ==============================================================================
 14. COMMANDS						*dblite-commands*

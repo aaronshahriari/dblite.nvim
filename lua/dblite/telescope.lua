@@ -13,6 +13,7 @@ vim.api.nvim_set_hl(0, "DbliteTelescopeActive", { link = "String", default = tru
 local type_labels = {
   oracle    = "Oracle",
   sqlserver = "SQL Server",
+  sqlite    = "SQLite",
 }
 
 function M.setup(opts)
@@ -26,6 +27,7 @@ function M.available()
 end
 
 local function target_str(c)
+  if c.type == "sqlite" then return c.path or "?" end
   local db_val       = (c.type == "sqlserver") and c.database or c.service
   local default_port = (c.type == "sqlserver") and 1433 or 1521
   return string.format("%s@%s:%d/%s",
@@ -35,6 +37,13 @@ end
 -- Builds the detail lines shown in the preview pane. The password is masked
 -- so the picker never reveals a stored secret on screen.
 local function detail_lines(c)
+  if c.type == "sqlite" then
+    return {
+      "Name      " .. (c.name or ""),
+      "Type      SQLite",
+      "Path      " .. (c.path or ""),
+    }
+  end
   local default_port = (c.type == "sqlserver") and 1433 or 1521
   local db_label     = (c.type == "sqlserver") and "Database" or "Service"
   local db_val       = (c.type == "sqlserver") and c.database or c.service
