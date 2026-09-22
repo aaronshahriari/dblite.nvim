@@ -790,6 +790,24 @@ local function render_script_log(parsed, elapsed)
   vim.bo[state.result_bufnr].modifiable = false
 end
 
+-- True when the active source is one command per line rather than
+-- terminator-delimited. Redis has no statement terminator, so the SQL
+-- blank-line/semicolon heuristic would fold every following command into one.
+local function line_oriented()
+  return state.active_conn ~= nil and state.active_conn.type == "redis"
+end
+
+-- Counts the runnable lines in a line-oriented buffer (blanks and # comments
+-- do not count), so a whole-buffer run knows whether it is one command or many.
+local function runnable_line_count(bufnr)
+  local n = 0
+  for _, ln in ipairs(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)) do
+    local t = vim.trim(ln)
+    if t ~= "" and t:sub(1, 1) ~= "#" then n = n + 1 end
+  end
+  return n
+end
+
 local function execute_core(query, script)
   if vim.fn.executable(config.binary) ~= 1 then
     local hint = _plugin_root
@@ -1073,10 +1091,11 @@ end
 function M.watch(spec_str, range)
   local bufnr = vim.api.nvim_get_current_buf()
   local sr, sc, er, ec, query
+  local lines_only = line_oriented()
   if range then
-    sr, sc, er, ec, query = query_module.at_range(bufnr, range.line1, range.line2)
+    sr, sc, er, ec, query = query_module.at_range(bufnr, range.line1, range.line2, lines_only)
   else
-    sr, sc, er, ec, query = query_module.at_cursor(bufnr)
+    sr, sc, er, ec, query = query_module.at_cursor(bufnr, lines_only)
   end
   if not query or query:match("^%s*$") then
     vim.notify("dblite: no query at cursor", vim.log.levels.WARN)
@@ -1109,13 +1128,17 @@ function M.watch_visual()
 end
 
 function M.execute()
-  local query = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
-  execute_core(query)
+  local bufnr = vim.api.nvim_get_current_buf()
+  local query = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), "\n")
+  -- For a line-oriented source a multi-command buffer *is* a script: running it
+  -- as one statement would concatenate the commands into nonsense.
+  local script = line_oriented() and runnable_line_count(bufnr) > 1
+  execute_core(query, script or nil)
 end
 
 function M.execute_at_cursor()
   local bufnr = vim.api.nvim_get_current_buf()
-  local sr, sc, er, ec, query = query_module.at_cursor(bufnr)
+  local sr, sc, er, ec, query = query_module.at_cursor(bufnr, line_oriented())
   if not sr or not query or query:match("^%s*$") then
     vim.notify("dblite: no query at cursor", vim.log.levels.WARN)
     return
@@ -1167,15 +1190,16 @@ function M.run_async(format, path, range)
 
   local bufnr = vim.api.nvim_get_current_buf()
   local sr, sc, er, ec, query
+  local lines_only = line_oriented()
   if range then
     -- Visual/range invocation: dump exactly the statement(s) the selection touches.
-    sr, sc, er, ec, query = query_module.at_range(bufnr, range.line1, range.line2)
+    sr, sc, er, ec, query = query_module.at_range(bufnr, range.line1, range.line2, lines_only)
     if not query or query:match("^%s*$") then
       vim.notify("dblite: nothing to run in selection", vim.log.levels.WARN)
       return
     end
   else
-    sr, sc, er, ec, query = query_module.at_cursor(bufnr)
+    sr, sc, er, ec, query = query_module.at_cursor(bufnr, lines_only)
     if not query or query:match("^%s*$") then
       query = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), "\n")
       sr = nil

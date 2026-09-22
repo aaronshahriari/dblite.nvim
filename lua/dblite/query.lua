@@ -54,12 +54,36 @@ local function fallback(bufnr)
   return start_row, 0, end_row, end_col, table.concat(text_lines, "\n")
 end
 
+-- Returns the given line range verbatim, for sources where one line is one
+-- statement. Redis has no statement terminator, so growing the range to the
+-- next blank line or semicolon would swallow every following command.
+local function lines_verbatim(bufnr, line1, line2)
+  local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+  local n     = #lines
+  if n == 0 then return nil end
+
+  local start_row = math.max(0,     math.min(line1, line2) - 1)
+  local end_row   = math.min(n - 1, math.max(line1, line2) - 1)
+
+  local text_lines = {}
+  for i = start_row + 1, end_row + 1 do
+    table.insert(text_lines, lines[i] or "")
+  end
+  local text = table.concat(text_lines, "\n")
+  if text:match("^%s*$") then return nil end
+  return start_row, 0, end_row, #(lines[end_row + 1] or ""), text
+end
+
 -- Expand a line range (1-indexed, inclusive) to cover the whole statement(s)
 -- it touches, using the same blank-line / semicolon separators as the
 -- at-cursor fallback: the top edge grows up to the start of the first statement
 -- and the bottom edge grows down to the end of the last one. Returns sr, sc, er,
 -- ec (0-indexed) and the concatenated text, or nil if the span is blank.
-function M.at_range(bufnr, line1, line2)
+--
+-- `line_mode` takes the range exactly as given instead — see lines_verbatim.
+function M.at_range(bufnr, line1, line2, line_mode)
+  if line_mode then return lines_verbatim(bufnr, line1, line2) end
+
   local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
   local n     = #lines
   if n == 0 then return nil end
@@ -89,10 +113,17 @@ end
 
 -- Returns sr, sc, er, ec (0-indexed), query_text for the statement at cursor.
 -- Returns nil if the cursor is on a blank line.
-function M.at_cursor(bufnr)
+--
+-- `line_mode` treats the cursor's line as the whole statement, for sources
+-- that are one command per line rather than terminator-delimited.
+function M.at_cursor(bufnr, line_mode)
   local cursor_line = vim.api.nvim_win_get_cursor(0)[1] - 1
   local cur = vim.api.nvim_buf_get_lines(bufnr, cursor_line, cursor_line + 1, false)[1] or ""
   if cur:match("^%s*$") then return nil end
+
+  if line_mode then
+    return cursor_line, 0, cursor_line, #cur, cur
+  end
 
   local ts_ok, sr, sc, er, ec, text = pcall(try_treesitter, bufnr)
   if ts_ok and sr then return sr, sc, er, ec, text end

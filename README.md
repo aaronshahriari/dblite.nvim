@@ -200,12 +200,24 @@ Trailing semicolons are stripped automatically. The legacy `:DbliteRun`, `:Dblit
 
 Pick a Redis connection and the buffer becomes a Redis command buffer — same keys, same result grid, same everything above it.
 
+**One command per line.** Keep a scratch buffer of the commands you use, put the cursor on one, and run it:
+
 ```redis
+KEYS *
 KEYS user:*
+KEYS session:a83f-2291
 HGETALL user:1042
 ZRANGE leaderboard 0 -1 WITHSCORES
 INFO replication
 ```
+
+| | |
+|---|---|
+| `:Dblite run at` | run **the line under the cursor** |
+| `:Dblite run` | run **every** line, in order, with a per-statement OK/ERROR log |
+| `:'<,'>Dblite run bulk csv` | export the selected lines to a file in the background |
+
+Redis has no statement terminator, so a line is a statement — no blank lines needed between commands, and `run at` never picks up the line below. That scratch buffer replaces the filter box, and unlike a filter box it is a file you can keep and commit.
 
 **Finding keys.** `KEYS <pattern>` is served by a full `SCAN` cursor loop rather than the real (server-blocking) `KEYS` command, so it is safe to run anywhere. Results are de-duplicated, since `SCAN` may hand back the same key more than once:
 

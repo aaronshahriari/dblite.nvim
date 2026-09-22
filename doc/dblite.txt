@@ -372,12 +372,25 @@ containing newlines, spaces or binary survive a round trip intact.
 With a Redis connection active, the buffer holds Redis commands instead of
 SQL. Everything above the result grid — paging, |dblite-history|,
 |dblite-inspect|, export, |dblite-bulk| and |dblite-watch| — works unchanged.
+
+Redis has no statement terminator, so one line is one command. Keep the
+commands you use in a scratch buffer and run the one under the cursor.
 >
+	KEYS *
 	KEYS user:*
+	KEYS session:a83f-2291
 	HGETALL user:1042
 	ZRANGE leaderboard 0 -1 WITHSCORES
 	INFO replication
 <
+	:Dblite run at		run the line under the cursor
+	:Dblite run		run every line in order, with a
+				per-statement log (|dblite-redis-script|)
+	:'<,'>Dblite run bulk	export the selected lines to a file
+
+Because a line is a statement, no blank lines are needed between commands and
+`run at` never picks up the line below. On a SQL connection the usual
+terminator-delimited rules apply instead.
 FINDING KEYS						*dblite-redis-keys*
 
 `KEYS <pattern>` is served by a full SCAN cursor loop rather than the real
