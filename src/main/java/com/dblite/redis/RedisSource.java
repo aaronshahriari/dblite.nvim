@@ -28,8 +28,25 @@ public final class RedisSource implements Source {
     /** Commands per pipeline flush. Bounded so neither side's socket buffer fills. */
     private static final int PIPELINE_CHUNK = 512;
 
-    /** SCAN's COUNT hint. Larger than redis-cli's default: fewer round trips. */
-    private static final int SCAN_COUNT = 500;
+    /**
+     * SCAN's COUNT hint, i.e. keys examined per iteration.
+     *
+     * This is the single biggest lever on how long a key listing takes. The
+     * cursor is sequential, so a listing costs roughly keyspace_size / COUNT
+     * blocking round trips, each one multiplied by the full network latency —
+     * at COUNT 500 a million-key keyspace is 2000 round trips, which is tens of
+     * seconds on anything but a local server. MATCH does not help: Redis
+     * examines every key and filters afterwards.
+     *
+     * 10000 keeps a million keys to ~100 round trips while staying within the
+     * range Redis tolerates without a noticeable single-command stall.
+     */
+    private static final int DEFAULT_SCAN_COUNT = 10_000;
+
+    private final int scanCount;
+
+    /** Whether a key listing enriches each key with type, TTL and size. */
+    private final boolean keyDetails;
 
     /** Safety valve for an unbounded `KEYS *` against a huge keyspace. */
     private static final int SCAN_HARD_CAP = 1_000_000;
@@ -40,6 +57,49 @@ public final class RedisSource implements Source {
     private final OutputStream out;
 
     public RedisSource(String rawUrl, String envUser, String envPassword) throws IOException {
+        this(rawUrl, envUser, envPassword, scanCountFromEnv());
+    }
+
+    /**
+     * DBLITE_SCAN_COUNT overrides the COUNT hint, so a very large keyspace can
+     * trade a longer single-command stall for far fewer round trips without a
+     * rebuild. Anything unparseable falls back to the default rather than
+     * failing a query over a malformed tuning knob.
+     */
+    /**
+     * DBLITE_KEY_DETAILS=0 drops the type/TTL/size columns from a key listing.
+     *
+     * Those three cost one command per key — 30,000 commands for a 10,000-key
+     * listing — so on a remote server they can outweigh the scan itself. When
+     * the task is just finding which keys exist, paying for them is optional.
+     */
+    private static boolean keyDetailsFromEnv() {
+        String raw = System.getenv("DBLITE_KEY_DETAILS");
+        if (raw == null || raw.isBlank()) return true;
+        String v = raw.trim().toLowerCase(Locale.ROOT);
+        return !(v.equals("0") || v.equals("false") || v.equals("no"));
+    }
+
+    private static int scanCountFromEnv() {
+        String raw = System.getenv("DBLITE_SCAN_COUNT");
+        if (raw == null || raw.isBlank()) return DEFAULT_SCAN_COUNT;
+        try {
+            int n = Integer.parseInt(raw.trim());
+            return n > 0 ? n : DEFAULT_SCAN_COUNT;
+        } catch (NumberFormatException e) {
+            return DEFAULT_SCAN_COUNT;
+        }
+    }
+
+    public RedisSource(String rawUrl, String envUser, String envPassword, int scanCount)
+            throws IOException {
+        this(rawUrl, envUser, envPassword, scanCount, keyDetailsFromEnv());
+    }
+
+    public RedisSource(String rawUrl, String envUser, String envPassword,
+                       int scanCount, boolean keyDetails) throws IOException {
+        this.scanCount  = scanCount > 0 ? scanCount : DEFAULT_SCAN_COUNT;
+        this.keyDetails = keyDetails;
         this.url = RedisUrl.parse(rawUrl);
 
         try {
@@ -90,7 +150,7 @@ public final class RedisSource implements Source {
 
     /** Sends one command and returns its reply, converting an error reply to an exception. */
     private RespValue command(List<String> args) throws IOException {
-        Resp.writeCommand(out, args);
+        Resp.sendCommand(out, args);
         RespValue reply = Resp.read(in);
         if (reply.isError()) throw new IOException(reply.text);
         return reply;
@@ -167,7 +227,7 @@ public final class RedisSource implements Source {
             // A polite QUIT, but never at the cost of hanging on exit: the
             // socket close below is what actually frees the connection.
             socket.setSoTimeout(2_000);
-            Resp.writeCommand(out, List.of("QUIT"));
+            Resp.sendCommand(out, List.of("QUIT"));
             Resp.read(in);
         } catch (IOException ignored) {
             // Server may have closed first, or a pipeline left the stream mid
@@ -201,7 +261,14 @@ public final class RedisSource implements Source {
      */
     private Rows keyListing(String pattern, int maxRows) throws IOException {
         List<String> keys = isGlob(pattern) ? scanKeys(pattern, maxRows) : exactKey(pattern);
-        return describeKeys(keys);
+        return keyDetails ? describeKeys(keys) : keysOnly(keys);
+    }
+
+    /** Just the names — no follow-up command per key. */
+    private static Rows keysOnly(List<String> keys) {
+        List<Cell[]> rows = new ArrayList<>(keys.size());
+        for (String k : keys) rows.add(new Cell[] { Cell.of(k) });
+        return new ListRows(new String[] { "key" }, new String[] { "string" }, rows);
     }
 
     private List<String> exactKey(String key) throws IOException {
@@ -220,7 +287,7 @@ public final class RedisSource implements Source {
 
         do {
             RespValue reply = command(List.of(
-                "SCAN", cursor, "MATCH", pattern, "COUNT", Integer.toString(SCAN_COUNT)));
+                "SCAN", cursor, "MATCH", pattern, "COUNT", Integer.toString(scanCount)));
             if (!reply.isAggregate() || reply.items.size() < 2) {
                 throw new IOException("Unexpected SCAN reply shape");
             }

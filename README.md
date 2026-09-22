@@ -278,6 +278,43 @@ DEL session:expired:a83f
 
 Because the protocol is length-prefixed, values containing newlines, spaces, commas or quotes round-trip exactly. Quote them as you would in `redis-cli` — `"a\nb"` for an escape, `'{"a": 1}'` for a JSON literal.
 
+**Performance.** A key listing's cost is round trips, not bytes. `SCAN`'s cursor is sequential and cannot be pipelined, so a listing costs roughly `keyspace_size / scan_count` blocking round trips, each paying full network latency. `MATCH` does **not** help — Redis examines every key and filters afterwards.
+
+Measured against a synthetic keyspace (`RedisScanPerfTest` prints these):
+
+| keyspace | matched | SCAN round trips | commands |
+|---|---|---|---|
+| 10,000 | 100 | 1 | 301 |
+| 100,000 | 500 | 10 | 1,510 |
+| 1,000,000 | 2,000 | 100 | 6,100 |
+| 1,000,000 | 200,000 (capped 10k) | 5 | 30,005 |
+| 1,000,000 | 200,000, `key_details = false` | 100 | **100** |
+
+Three knobs, in the order worth reaching for:
+
+```lua
+redis = {
+  scan_count  = 10000,  -- keys examined per SCAN iteration
+  key_details = true,   -- false = key names only, no type/ttl/size
+},
+max_rows = 10000,       -- caps a dense match early
+```
+
+- **`scan_count`** is the big lever. At the old default of 500, a million-key keyspace was 2,000 round trips — 10s at 5ms RTT, 30s at 15ms. Raise it further on a large or remote keyspace; the tradeoff is a longer single-`SCAN` stall on the (single-threaded) server.
+- **`key_details = false`** drops `type`/`ttl`/`size`, which are one command *each per key* — 30,000 commands for a 10,000-key listing. Set it false if you mostly want to know which keys exist.
+- **`max_rows`** ends a dense match early: a prefix matching 200,000 keys stops after 5 `SCAN`s instead of walking the whole keyspace.
+
+To see which regime you're in:
+
+```redis
+DBSIZE
+INFO server
+```
+
+`DBSIZE` is your keyspace size — divide by `scan_count` for the round-trip count. If `redis_version` is 8 or newer, the server also optimizes glob patterns internally, so prefix scans are cheaper before any of this applies.
+
+**The inherent limit:** a sparse prefix in a huge keyspace is `O(keyspace)` no matter how it's tuned. If you control the writes, maintaining a `SET` of keys per namespace turns the lookup into an `O(1)` `SMEMBERS` — that's the only way to actually beat a scan. An exact key name already skips `SCAN` entirely.
+
 **Completion.** There is no Redis language server, so dblite builds completion from the live instance via [blink.cmp](https://github.com/Saghen/blink.cmp):
 
 | where the cursor is | what you get |
@@ -715,7 +752,11 @@ require('dblite').setup({
   max_history    = 20,            -- past query results to keep; 0 = unlimited
   show_column_types = false,      -- show [TYPE] next to column headers by default
   filetypes      = { 'sql', 'plsql', 'mysql', 'sqlite', 'redis' }, -- buffers dblite attaches to (editor keymaps + on_attach)
-  redis          = { completion = { enabled = true, max_keys = 5000 } }, -- Redis command/key/field completion
+  redis          = {
+    scan_count   = 10000,  -- keys examined per SCAN iteration (main perf lever)
+    key_details  = true,   -- false = key listings return names only, no type/ttl/size
+    completion   = { enabled = true, max_keys = 5000 }, -- command/key/field completion
+  },
   on_attach      = nil,           -- function(bufnr) run per SQL buffer for custom buffer-local keybinds
   filetype       = '',            -- filetype for the result buffer ('' = no highlighting)
   flash_timeout  = 2000,          -- ms to hold the query highlight; 0 = hold until results

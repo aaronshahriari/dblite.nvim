@@ -379,6 +379,16 @@ function M.env(conn)
     -- Redis is frequently unauthenticated; only pass what was actually set.
     if conn.user     and conn.user     ~= "" then env.DB_USER     = M.expand_env(conn.user)     end
     if conn.password and conn.password ~= "" then env.DB_PASSWORD = M.expand_env(conn.password) end
+    -- SCAN's COUNT dominates how long a key listing takes, so it is tunable
+    -- per install without a rebuild. See dblite-redis-performance.
+    local redis_cfg = (require("dblite.config").redis or {})
+    local scan_count = conn.scan_count or redis_cfg.scan_count
+    if tonumber(scan_count) then env.DBLITE_SCAN_COUNT = tostring(math.floor(tonumber(scan_count))) end
+    -- type/ttl/size cost one command per key, which on a remote server can
+    -- outweigh the scan; turning them off makes a key listing scan-only.
+    local details = conn.key_details
+    if details == nil then details = redis_cfg.key_details end
+    if details == false then env.DBLITE_KEY_DETAILS = "0" end
   elseif t ~= "sqlite" and conn.auth ~= "kerberos" then
     env.DB_USER     = M.expand_env(conn.user)
     env.DB_PASSWORD = M.expand_env(conn.password or "")

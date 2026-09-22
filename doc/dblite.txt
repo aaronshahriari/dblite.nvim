@@ -471,6 +471,59 @@ Arguments are quoted as in redis-cli: double quotes honour escapes (`\n`,
 `\t`, `\xHH`), single quotes are literal. A reply of `+OK` is reported as an
 executed statement; any other reply is shown in the grid.
 
+PERFORMANCE						*dblite-redis-performance*
+
+A key listing costs round trips, not bytes. SCAN's cursor is sequential and
+cannot be pipelined, so a listing costs about keyspace_size / scan_count
+blocking round trips, each paying the full network latency. MATCH does not
+help: Redis examines every key and applies the pattern afterwards.
+
+Measured against a synthetic keyspace (RedisScanPerfTest prints these):
+
+	keyspace    matched               SCANs   commands
+	10,000      100                   1       301
+	100,000     500                   10      1,510
+	1,000,000   2,000                 100     6,100
+	1,000,000   200,000 (cap 10k)     5       30,005
+	1,000,000   200,000 (no details)  100     100
+
+Three knobs, in the order worth reaching for: >
+
+	redis = {
+	  scan_count  = 10000,  -- keys examined per SCAN iteration
+	  key_details = true,   -- false = key names only
+	},
+	max_rows = 10000,       -- caps a dense match early
+<
+`scan_count` is the big lever. At the old default of 500 a million-key
+keyspace was 2000 round trips — ten seconds at 5ms RTT, thirty at 15ms. Raise
+it on a large or remote keyspace; the tradeoff is a longer stall inside a
+single SCAN on the single-threaded server. DBLITE_SCAN_COUNT overrides it for
+one invocation of the binary.
+
+`key_details = false` drops the type/ttl/size columns. Each is one command per
+key — 30,000 commands for a 10,000-key listing — so on a remote server they
+can cost more than the scan itself. DBLITE_KEY_DETAILS=0 does the same for one
+invocation.
+
+`max_rows` (|dblite-config|) ends a dense match early: a prefix matching
+200,000 keys stops after five SCANs rather than finishing the keyspace.
+
+To see which regime you are in: >
+
+	DBSIZE
+	INFO server
+<
+DBSIZE is the keyspace size; divide by `scan_count` for the round-trip count.
+A `redis_version` of 8 or newer also optimizes glob patterns server-side, so
+prefix scans start out cheaper.
+
+A sparse prefix in a very large keyspace is O(keyspace) however it is tuned.
+Where the writes are under your control, maintaining a SET of keys per
+namespace turns the lookup into an O(1) SMEMBERS, which is the only way to
+genuinely beat a scan. An exact key name already skips SCAN entirely
+(|dblite-redis-keys|).
+
 COMPLETION						*dblite-redis-completion*
 
 There is no Redis language server, so completion is built from the live
@@ -893,8 +946,10 @@ defaults, so you only need to specify what you change. Defaults: >lua
 	  max_col_width  = 50,            -- truncate cells wider than this; 0=off
 	  max_history    = 20,            -- past results to keep; 0 = unlimited
 	  show_column_types = false,      -- show [TYPE] in headers by default
-	  redis          = { completion = { enabled = true,
-	                                    max_keys = 5000 } },
+	  redis          = { scan_count  = 10000,
+	                     key_details = true,
+	                     completion  = { enabled = true,
+	                                     max_keys = 5000 } },
 	  filetypes      = { 'sql', 'plsql', 'mysql', 'sqlite', 'redis' }, -- buffers to
 	                                  --   attach editor keymaps + on_attach to
 	  on_attach      = nil,           -- function(bufnr): custom per-SQL-buffer

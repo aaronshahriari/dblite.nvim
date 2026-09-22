@@ -46,6 +46,16 @@ local M = {
     width = 30,  -- columns for the side panel
   },
   redis = {
+    -- Keys examined per SCAN iteration. This is the main lever on how long a
+    -- key listing takes: SCAN's cursor is sequential, so a listing costs about
+    -- keyspace_size / scan_count blocking round trips, each one paying the full
+    -- network latency. Raise it on a large or remote keyspace; lower it if a
+    -- single SCAN stalling the server matters more than your own wait.
+    scan_count = 10000,
+    -- Enrich a key listing with type/ttl/size. Each is one command per key, so
+    -- a 10,000-key listing costs 30,000 commands on top of the scan. Set false
+    -- for a scan-only listing that returns just the key names.
+    key_details = true,
     -- Redis has no catalog and no language server, so completion is built from
     -- the live instance: command names, key namespaces, and a hash's fields.
     completion = {

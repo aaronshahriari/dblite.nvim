@@ -50,6 +50,7 @@ dblite-redis-filetype	dblite.txt	/*dblite-redis-filetype*
 dblite-redis-json	dblite.txt	/*dblite-redis-json*
 dblite-redis-keys	dblite.txt	/*dblite-redis-keys*
 dblite-redis-limits	dblite.txt	/*dblite-redis-limits*
+dblite-redis-performance	dblite.txt	/*dblite-redis-performance*
 dblite-redis-script	dblite.txt	/*dblite-redis-script*
 dblite-redis-shapes	dblite.txt	/*dblite-redis-shapes*
 dblite-redis-watch	dblite.txt	/*dblite-redis-watch*

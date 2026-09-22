@@ -21,7 +21,13 @@ public final class Resp {
 
     // --- Writing -----------------------------------------------------------
 
-    /** Writes one command as a RESP array of bulk strings. */
+    /**
+     * Writes one command as a RESP array of bulk strings, leaving it buffered.
+     *
+     * Flushing is the caller's job on purpose: a pipeline exists to put many
+     * commands on the wire before reading any reply, and with TCP_NODELAY set a
+     * flush per command becomes a packet per command.
+     */
     public static void writeCommand(OutputStream out, List<String> args) throws IOException {
         StringBuilder sb = new StringBuilder();
         sb.append('*').append(args.size()).append("\r\n");
@@ -30,6 +36,11 @@ public final class Resp {
             sb.append('$').append(b.length).append("\r\n").append(arg).append("\r\n");
         }
         out.write(sb.toString().getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** Writes one command and sends it immediately. */
+    public static void sendCommand(OutputStream out, List<String> args) throws IOException {
+        writeCommand(out, args);
         out.flush();
     }
 
