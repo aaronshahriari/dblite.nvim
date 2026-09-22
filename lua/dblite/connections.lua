@@ -246,4 +246,23 @@ function M.jdbc_url(conn)
     conn.host, tonumber(conn.port) or 1521, conn.service)
 end
 
+-- Expands $VAR references in a stored string against the real environment.
+-- Used for credentials, and for the LOAD DATA infile path.
+function M.expand_env(s)
+  if type(s) ~= "string" then return s end
+  return (s:gsub("%$([%w_]+)", function(var) return os.getenv(var) or ("$" .. var) end))
+end
+
+-- Environment the `dblite` binary needs to reach `conn`. SQLite has no
+-- credentials, and Kerberos gets them from the ticket cache rather than us.
+function M.env(conn)
+  local env = { DB_URL = M.jdbc_url(conn) }
+  local t = conn.type or "oracle"
+  if t ~= "sqlite" and conn.auth ~= "kerberos" then
+    env.DB_USER     = M.expand_env(conn.user)
+    env.DB_PASSWORD = M.expand_env(conn.password or "")
+  end
+  return env
+end
+
 return M

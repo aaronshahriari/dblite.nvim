@@ -5,6 +5,8 @@ local telescope    = require("dblite.telescope")
 local query_module = require("dblite.query")
 local load_mod     = require("dblite.load")
 local jobs         = require("dblite.jobs")
+local binds_mod    = require("dblite.binds")
+local inline       = require("dblite.inline")
 
 local M = {}
 
@@ -216,7 +218,7 @@ local function render_status_line(overrides, cancelled_items)
     elseif item == "connection" then
       value = state.active_conn and state.active_conn.name or "no connection"
     elseif item == "binds_file" then
-      if vim.fn.filereadable(binds_file_path()) == 1 then value = "binds" end
+      if vim.fn.filereadable(binds_mod.file_path()) == 1 then value = "binds" end
     elseif item == "history" then
       if #state.history > 1 then
         value = string.format("◀ %d/%d ▶", state.history_idx, #state.history)
@@ -611,82 +613,6 @@ local function ensure_result_buffer()
   return bufnr
 end
 
-local function binds_file_path()
-  return vim.fn.getcwd() .. "/dblite.binds.json"
-end
-
-local function load_binds_file()
-  local f = io.open(binds_file_path(), "r")
-  if not f then return {} end
-  local raw = f:read("*a"); f:close()
-  if raw == "" then return {} end
-  local ok, data = pcall(vim.json.decode, raw)
-  return (ok and type(data) == "table") and data or {}
-end
-
-local function flatten_binds(tbl, prefix, out)
-  out = out or {}
-  for k, v in pairs(tbl) do
-    local key = prefix and (prefix .. "." .. k) or k
-    if type(v) == "table" then
-      flatten_binds(v, key, out)
-    else
-      out[key] = v
-    end
-  end
-  return out
-end
-
--- JSON number → verbatim; "~expr" → raw SQL; string → auto-quoted + escaped
-local function format_bind_value(v)
-  if type(v) == "number" then return tostring(v) end
-  local s = tostring(v)
-  if s:sub(1, 1) == "~" then return s:sub(2) end
-  return "'" .. s:gsub("'", "''") .. "'"
-end
-
--- Find :bind references, ignoring anything that only *looks* like one: text
--- inside string literals, quoted identifiers or comments, and — crucially — the
--- identifier after a `::` cast / scope-resolution operator (e.g. `col::type`,
--- `SCHEMA::obj`). Without the last rule a token like `x::refs` was wrongly
--- reported as a missing bind `refs`. We blank those spans (preserving length)
--- before scanning so column/byte offsets stay intact.
-local function parse_bind_names(sql)
-  local seen, names = {}, {}
-  local blank = function(s) return string.rep(" ", #s) end
-  local stripped = sql
-    :gsub("/%*.-%*/", blank)      -- /* block comments */
-    :gsub("%-%-[^\n]*", blank)    -- -- line comments
-    :gsub("'[^']*'", blank)       -- 'string literals'
-    :gsub('"[^"]*"', blank)       -- "quoted identifiers"
-    :gsub("::", "  ")             -- cast / scope operator, not a bind
-  for raw in stripped:gmatch(":[a-zA-Z_][a-zA-Z0-9_.]*") do
-    local key = raw:sub(2):gsub("%.+$", "")
-    if not seen[key] then seen[key] = true; table.insert(names, key) end
-  end
-  return names
-end
-
-local function apply_binds(sql, binds)
-  local sorted = vim.tbl_keys(binds)
-  table.sort(sorted, function(a, b) return #a > #b end)
-  for _, name in ipairs(sorted) do
-    local val  = format_bind_value(binds[name])
-    local pat  = name:gsub("%.", "%%.")           -- escape dots for Lua pattern
-    local repl = val:gsub("%%", "%%%%")           -- escape % in replacement string
-    sql = sql:gsub(":" .. pat .. "([^a-zA-Z0-9_.])", repl .. "%1")
-    if sql:sub(-(#name + 1)) == ":" .. name then
-      sql = sql:sub(1, -(#name + 2)) .. val
-    end
-  end
-  return sql
-end
-
-local function expand_env(s)
-  if type(s) ~= "string" then return s end
-  return (s:gsub("%$([%w_]+)", function(var) return os.getenv(var) or ("$" .. var) end))
-end
-
 -- Render a script-mode run (per-statement OK/ERROR log) into the result buffer.
 local function render_script_log(parsed, elapsed)
   if not state.result_bufnr or not vim.api.nvim_buf_is_valid(state.result_bufnr) then return end
@@ -744,7 +670,7 @@ local function execute_core(query, script)
     state.current_job = nil
   end
 
-  local bind_names = parse_bind_names(query)
+  local bind_names = binds_mod.parse_names(query)
 
   local function do_run(q)
     state.last_elapsed = nil
@@ -761,11 +687,7 @@ local function execute_core(query, script)
   end
 
   local c = state.active_conn
-  local sys_env = { DB_URL = connections.jdbc_url(c) }
-  if c.type ~= "sqlite" and c.auth ~= "kerberos" then
-    sys_env.DB_USER     = expand_env(c.user)
-    sys_env.DB_PASSWORD = expand_env(c.password or "")
-  end
+  local sys_env = connections.env(c)
 
   set_global_cancel_keymap()
 
@@ -867,7 +789,7 @@ local function execute_core(query, script)
   end -- do_run
 
   if #bind_names > 0 then
-    local file_binds = flatten_binds(load_binds_file())
+    local file_binds = binds_mod.flatten(binds_mod.load_file())
     local missing = vim.tbl_filter(
       function(n) return file_binds[n] == nil end, bind_names)
     if #missing > 0 then
@@ -878,7 +800,7 @@ local function execute_core(query, script)
       M.open_binds()
       return
     end
-    do_run(apply_binds(query, file_binds))
+    do_run(binds_mod.apply(query, file_binds))
   else
     do_run(query)
   end
@@ -964,9 +886,9 @@ function M.run_async(format, path, range)
 
   -- Resolve binds before we prompt for a path, so missing binds fail fast.
   local final_q = query
-  local bind_names = parse_bind_names(query)
+  local bind_names = binds_mod.parse_names(query)
   if #bind_names > 0 then
-    local file_binds = flatten_binds(load_binds_file())
+    local file_binds = binds_mod.flatten(binds_mod.load_file())
     local missing = vim.tbl_filter(function(n) return file_binds[n] == nil end, bind_names)
     if #missing > 0 then
       vim.notify(
@@ -976,7 +898,7 @@ function M.run_async(format, path, range)
       M.open_binds()
       return
     end
-    final_q = apply_binds(query, file_binds)
+    final_q = binds_mod.apply(query, file_binds)
   end
 
   if not path or path == "" then
@@ -1005,11 +927,7 @@ function M.run_async(format, path, range)
   if sr then set_flash(bufnr, sr, sc, er, ec) end
 
   local c = state.active_conn
-  local sys_env = { DB_URL = connections.jdbc_url(c) }
-  if c.type ~= "sqlite" and c.auth ~= "kerberos" then
-    sys_env.DB_USER     = expand_env(c.user)
-    sys_env.DB_PASSWORD = expand_env(c.password or "")
-  end
+  local sys_env = connections.env(c)
 
   local cmd = { config.binary, "--to-file", path, "--format", format }
 
@@ -1776,7 +1694,7 @@ function M.load(opts)
   end
 
   -- Resolve INFILE relative to cwd, expanding ~ and $ENV_VAR (as export does).
-  local path = vim.fn.fnamemodify(vim.fn.expand(expand_env(control.infile)), ":p")
+  local path = vim.fn.fnamemodify(vim.fn.expand(connections.expand_env(control.infile)), ":p")
   if vim.fn.filereadable(path) ~= 1 then
     vim.notify("dblite: INFILE not readable: " .. path, vim.log.levels.ERROR)
     return
@@ -1804,7 +1722,7 @@ vim.api.nvim_create_user_command("DbliteLoad", M.load, { range = true })
 local _binds_win = nil
 
 local function ensure_binds_file()
-  local path = binds_file_path()
+  local path = binds_mod.file_path()
   if vim.fn.filereadable(path) == 0 then
     vim.fn.writefile({ "{", "}" }, path)
     vim.notify("dblite: created " .. path, vim.log.levels.INFO)
@@ -2011,12 +1929,23 @@ do
   })
 end
 
+-- Run a statement headlessly on a named saved connection and hand the result
+-- to Lua. No result window, no history, no jobs panel, and the active
+-- connection is left alone — see lua/dblite/inline.lua for the full options.
+--
+--   require("dblite").inline({ conn = "prod", sql = "select ..." },
+--     function(err, res)
+--       if err then return end
+--       vim.notify(res.rows[1].EXPIRES_AT)
+--     end)
+M.inline = inline.run
+
 function M.get_active_conn()
   return state.active_conn
 end
 
 function M.get_flat_binds()
-  return flatten_binds(load_binds_file())
+  return binds_mod.flatten(binds_mod.load_file())
 end
 
 function M.hover_bind()
@@ -2036,7 +1965,7 @@ function M.hover_bind()
   if not name then return end
   name = name:gsub("%.+$", "")
 
-  local binds = flatten_binds(load_binds_file())
+  local binds = binds_mod.flatten(binds_mod.load_file())
   local val   = binds[name]
   if val == nil then
     vim.lsp.util.open_floating_preview(
@@ -2045,7 +1974,7 @@ function M.hover_bind()
     return
   end
 
-  local display = format_bind_value(val)
+  local display = binds_mod.format_value(val)
   vim.lsp.util.open_floating_preview(
     { ":" .. name, "", display }, "sql",
     { border = "rounded", focus_id = "dblite_bind_hover" })

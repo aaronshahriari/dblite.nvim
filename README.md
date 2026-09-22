@@ -48,6 +48,7 @@ The database work runs in a native binary (GraalVM), so there's **no JVM at runt
 - **Bulk background exports** — stream huge queries straight to a file asynchronously (no row cap), tracked in a jobs panel with live progress, while you keep working.
 - **Load** a CSV into a table with a SQL\*Loader-style `LOAD DATA` block — previewed as `INSERT`s before you commit.
 - **Inspect** any page untruncated as JSON, table, or CSV.
+- **Inline queries from Lua** — `db.inline{ conn = 'prod', sql = ... }` runs headlessly and hands you the rows, so you can embed a query in a keymap, timer or autocommand without touching the UI.
 - **SQL autocomplete** via [blink.cmp](https://github.com/Saghen/blink.cmp) — tables, columns, and bind names from the live schema.
 - **Connection UI** — a built-in side panel, or an opt-in [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim) picker.
 
@@ -398,7 +399,58 @@ db.toggle_binds()          -- toggle the dblite.binds.json split
 db.toggle_panel()          -- toggle the connections panel
 db.get_active_conn()       -- active connection object, or nil
 db.get_flat_binds()        -- flattened dblite.binds.json as a table
+db.inline(opts, cb)        -- run a query headlessly, no UI (see below)
 ```
+
+### Inline queries
+
+`db.inline()` runs a statement on a **named** saved connection and hands the rows
+back to Lua. It is the only run path with no UI at all: no result window, no
+spinner, no history entry, no jobs panel — and it neither reads nor changes the
+active connection. Embed it in keymaps, timers, autocommands or your own plugins.
+
+```lua
+require('dblite').inline({
+  conn = 'prod',
+  sql  = 'select expires_at from creds where service = :svc',
+  binds = { svc = 'prod-aws' },
+}, function(err, res)
+  if err then return vim.notify(err, vim.log.levels.ERROR) end
+  vim.notify('creds expire ' .. res.rows[1].EXPIRES_AT)
+end)
+```
+
+Rows come back keyed by column label (`res.rows[1].EXPIRES_AT`), which is the
+binary's own wire format. `res.values` gives the same rows positionally, and
+`res.json` the raw JSON if you would rather parse it yourself.
+
+| option | default | |
+| --- | --- | --- |
+| `sql` | — | statement to run (required) |
+| `conn` | — | name of a saved connection (required) |
+| `binds` | `{}` | values for `:name` references |
+| `binds_file` | `false` | also read `dblite.binds.json` from the cwd |
+| `max_rows` | `config.max_rows` | row cap; `0` = uncapped |
+| `script` | `false` | run as a multi-statement script |
+| `timeout` | — | ms before the query is killed |
+| `null_as_nil` | `false` | decode SQL `NULL` as `nil` instead of `vim.NIL` |
+| `sync` | `false` | block and return instead of calling back |
+
+Async by default: it returns the `vim.system()` handle (so you can `job:kill(15)`)
+and your callback runs on the main loop, safe for `vim.notify` and API calls.
+Pass `sync = true` to get `res, err` directly — handy in a statusline, but pair
+it with `timeout` so a slow query cannot freeze the editor.
+
+```lua
+local res, err = require('dblite').inline({
+  conn = 'prod', sql = 'select count(*) n from jobs where state = 1',
+  sync = true, timeout = 2000,
+})
+```
+
+Nothing throws. A missing binary, unknown connection, unresolved bind or SQL
+error all arrive as an error string, with `res` nil. Full reference:
+`:help dblite-inline`.
 
 <details>
 <summary>Full API surface</summary>

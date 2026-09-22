@@ -23,7 +23,8 @@ CONTENTS						*dblite* *dblite.nvim*
 	15. Keymaps ..................... |dblite-keymaps|
 	16. Configuration ............... |dblite-config|
 	17. Lua API ..................... |dblite-api|
-	18. Highlights .................. |dblite-highlights|
+	18. Inline queries .............. |dblite-inline|
+	19. Highlights .................. |dblite-highlights|
 
 ==============================================================================
 1. INTRODUCTION						*dblite-introduction*
@@ -700,6 +701,7 @@ All functionality is available programmatically: >lua
 	db.get_active_conn()       -- the active connection table, or nil
 	db.get_flat_binds()        -- flattened dblite.binds.json as a table
 	db.attach(bufnr)           -- apply editor keymaps + on_attach to a buffer
+	db.inline(opts, cb)        -- headless query, no UI — see |dblite-inline|
 <
 Example user keymaps. Prefer `keymaps.editor` or `on_attach` (|dblite-config|)
 so these stay buffer-local to SQL buffers; a global map like below fires
@@ -713,7 +715,100 @@ everywhere: >lua
 	vim.keymap.set('n', '<leader>do', db.toggle_dbout,      { desc = 'dblite: dbout' })
 <
 ==============================================================================
-18. HIGHLIGHTS						*dblite-highlights*
+18. INLINE QUERIES					*dblite-inline* *db.inline()*
+
+`db.inline()` runs a statement against a named saved connection and hands the
+result straight back to Lua. It is the only run path that touches no UI: no
+result window, no spinner, no |dblite-history| entry, no jobs panel, no flash
+highlight, and the active connection is neither read nor changed. That makes
+it safe to call from timers, autocommands, statusline functions and your own
+plugins — you decide what to do with the rows. >lua
+	require('dblite').inline({
+	  conn = 'prod',
+	  sql  = 'select expires_at from creds where service = :svc',
+	  binds = { svc = 'prod-aws' },
+	}, function(err, res)
+	  if err then return vim.notify(err, vim.log.levels.ERROR) end
+	  vim.notify('creds expire ' .. res.rows[1].EXPIRES_AT)
+	end)
+<
+OPTIONS							*dblite-inline-opts*
+
+	sql		(string, required) the statement to run.
+	conn		(string, required) the name of a saved connection, as
+			shown by |:DbliteListConns|. Unlike |:DbliteRun| this
+			never falls back to the active connection, so an
+			inline call always hits the database you named.
+	binds		(table) values for `:name` references in `sql`, applied
+			exactly as |dblite-binds| does. Missing names are
+			returned as an error rather than opening the binds
+			editor.
+	binds_file	(boolean, default false) also read dblite.binds.json
+			from the current directory, underneath `binds`. Off by
+			default: that file is a per-cwd editing aid, so an API
+			call only sees it when it asks.
+	max_rows	(number, default `config.max_rows`) row cap; 0 = no cap.
+	script		(boolean) run as a multi-statement script, like
+			|:DbliteRunScript|. The result carries `results`,
+			`executed`, `failed` and `total` instead of rows.
+	timeout		(number) milliseconds before the query is killed.
+	null_as_nil	(boolean, default false) decode SQL NULL as `nil`
+			instead of |vim.NIL|.
+	sync		(boolean) block and return instead of calling back.
+
+RESULT							*dblite-inline-result*
+
+	res.rows	list of rows, each a table keyed by column label —
+			`res.rows[1].EMAIL`. This is the binary's own wire
+			format, so it costs nothing.
+	res.values	the same rows positionally, in column order —
+			`res.values[1][2]`. Built on first access only.
+	res.columns	column labels, in order.
+	res.column_types  database type name per column, in order.
+	res.count	number of rows returned.
+	res.update_count  rows affected by a DML statement. Set instead of
+			rows for INSERT/UPDATE/DELETE; -1 for DDL.
+	res.conn	name of the connection the query ran on.
+	res.elapsed	seconds the query took.
+	res.json	the binary's raw JSON output, unparsed.
+
+Note that duplicate column labels collapse, since rows are JSON objects. Alias
+them in the query (`select a.id aid, b.id bid`) when that matters.
+
+ASYNC AND SYNC						*dblite-inline-async*
+
+By default `db.inline()` is asynchronous: it returns the |vim.system()| handle
+immediately, and your callback runs later on the main loop, so it may safely
+call |vim.notify()|, set buffers or otherwise use the API. Keep the handle to
+cancel a query that is taking too long: >lua
+	local job = require('dblite').inline({ conn = 'prod', sql = q }, on_done)
+	vim.defer_fn(function() job:kill(15) end, 5000)
+<
+Pass `sync = true` (or omit the callback) to block instead. The call then
+returns `res, err` directly, which is what statusline and |expr| functions
+need — but a slow query freezes the editor, so pair it with `timeout`: >lua
+	local res, err = require('dblite').inline({
+	  conn = 'prod', sql = 'select count(*) n from jobs where state = 1',
+	  sync = true, timeout = 2000,
+	})
+	return err and '?' or ('jobs: ' .. res.rows[1].n)
+<
+ERRORS							*dblite-inline-errors*
+
+Nothing here throws. Every failure — a missing binary, an unknown connection
+name, unresolved binds, a SQL error from the database, unparseable output —
+arrives as an error string: as the callback's first argument when async, or as
+the second return value when sync. `res` is nil whenever `err` is set. >lua
+	require('dblite').inline({ conn = 'prod', sql = q }, function(err, res)
+	  if err then
+	    vim.notify(err, vim.log.levels.WARN)
+	    return
+	  end
+	  ...
+	end)
+<
+==============================================================================
+19. HIGHLIGHTS						*dblite-highlights*
 
 dblite defines these highlight groups (all `default`, so your colorscheme or
 an explicit `nvim_set_hl` override wins):
