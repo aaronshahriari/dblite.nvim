@@ -45,6 +45,22 @@ end
 -- `SCHEMA::obj`). Without the last rule a token like `x::refs` was wrongly
 -- reported as a missing bind `refs`. We blank those spans (preserving length)
 -- before scanning so column/byte offsets stay intact.
+-- Whether `conn` uses bind parameters at all.
+--
+-- Redis keys are colon-namespaced (`user:1042`, `queue:jobs`, `session:a83f`),
+-- which is character-for-character the SQL bind syntax `:name`. Binds are a SQL
+-- feature, so for Redis the answer is no — otherwise half of every key name
+-- would be read as a missing parameter.
+function M.supported(conn)
+  return not (conn and conn.type == "redis")
+end
+
+-- parse_names, but scoped to a connection: no binds for a source that has none.
+function M.names_for(conn, sql)
+  if not M.supported(conn) then return {} end
+  return M.parse_names(sql)
+end
+
 function M.parse_names(sql)
   local seen, names = {}, {}
   local blank = function(s) return string.rep(" ", #s) end

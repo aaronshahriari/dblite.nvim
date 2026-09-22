@@ -14,7 +14,7 @@ local M = {
   binary = resolve_binary(),
   -- Filetypes dblite attaches to: editor keymaps (below) are set buffer-local
   -- on these, and `on_attach` fires for each such buffer.
-  filetypes = { "sql", "plsql", "mysql", "sqlite" },
+  filetypes = { "sql", "plsql", "mysql", "sqlite", "redis" },
   -- Optional per-buffer hook: on_attach(bufnr) runs once for every SQL buffer
   -- (after the built-in editor keymaps are applied). Use it for custom,
   -- buffer-local keybinds/behaviour instead of hand-rolled autocmds, e.g.
@@ -26,10 +26,16 @@ local M = {
   --   end
   on_attach = nil,
   max_rows = 10000,
-  split_dir = "horizontal", -- "vertical" | "horizontal" | "tab"
+  -- Where the result window opens. "right"/"left"/"below"/"above" are the
+  -- unambiguous names; "vertical" (= right) and "horizontal" (= below) still
+  -- work. Change it live with `:DbliteSplit right`, which is remembered for the
+  -- next toggle and the next session.
+  split_dir = "horizontal", -- "right" | "left" | "below" | "above" | "tab"
   split_size = {
-    width = 80,   -- columns; used when split_dir = "vertical". 0 = let nvim decide.
-    height = 20,  -- rows;    used when split_dir = "horizontal". 0 = let nvim decide.
+    -- Defaults only: once you resize dbout by hand, that size is remembered
+    -- per axis and restored when you toggle it back.
+    width = 80,   -- columns; used for a left/right split. 0 = let nvim decide.
+    height = 20,  -- rows;    used for an above/below split. 0 = let nvim decide.
   },
   filetype = "", -- buffer filetype for results. "" disables highlighting (fastest for huge results).
   page_size = 100,    -- rows per page in the result buffer
@@ -117,6 +123,7 @@ local M = {
       toggle_binds  = "", -- toggle dblite.binds.json
       inspect       = "", -- inspect current page untruncated
       fullscreen    = "", -- toggle dbout fullscreen
+      cycle_split   = "", -- flip the result window between right and below
       connections   = "", -- open the connections JSON file
     },
     dbout = {  -- keymaps active inside the result/output buffer
@@ -129,6 +136,7 @@ local M = {
       hover_query  = "K",       -- hover to show the executed query
       toggle_types = "d",       -- toggle column type annotations
       toggle_dbout = "",        -- show/hide the result window from inside dbout
+      cycle_split  = "",        -- flip between a right-hand and a below split
     },
     -- Editor keymaps are buffer-local and set ONLY in SQL buffers (see
     -- `filetypes` below), so they never fire in unrelated buffers/windows.
@@ -148,6 +156,7 @@ local M = {
       binds        = "<leader>b",  -- open dblite.binds.json popup         (M.edit_binds)
       connections  = "",           -- open the connections JSON file       (M.edit_connections_file)
       fullscreen   = "<leader>l",  -- toggle dbout fullscreen              (M.toggle_fullscreen)
+      cycle_split  = "",           -- flip dbout between right and below   (M.cycle_split)
       hover_bind   = "K",          -- hover to show bind value under cursor (M.hover_bind)
     },
     panel = {    -- keymaps active inside the connections panel

@@ -31,13 +31,6 @@ WHERE m.type IN ('table', 'view')
 AND m.name NOT LIKE 'sqlite_%'
 ORDER BY m.name, p.cid]]
 
-local function expand_env(s)
-  if type(s) == "string" and s:sub(1, 1) == "$" then
-    return vim.fn.getenv(s:sub(2)) or s
-  end
-  return s
-end
-
 -- Builds:
 --   owners       = ["OWNER1", ...]          unique, in appearance order
 --   owner_tables = { OWNER1 = ["T1", ...] } tables per owner (no duplicates)
@@ -79,6 +72,10 @@ end
 -- Calls callback(schema) — cached per connection, in-flight deduplication.
 -- callback receives nil on failure.
 function M.get(conn, callback)
+  -- Redis has no SQL catalog to introspect; firing one of the queries below at
+  -- it would only produce an error reply.
+  if conn.type == "redis" then callback(nil); return end
+
   local id = conn.id
   local e  = _cache[id]
   if e and e.schema   then callback(e.schema); return end
@@ -89,11 +86,7 @@ function M.get(conn, callback)
   local sql = conn.type == "sqlserver" and MSSQL_SQL
     or conn.type == "sqlite" and SQLITE_SQL
     or ORACLE_SQL
-  local env = { DB_URL = connections.jdbc_url(conn) }
-  if conn.type ~= "sqlite" and conn.auth ~= "kerberos" then
-    env.DB_USER = expand_env(conn.user)
-    env.DB_PASSWORD = expand_env(conn.password or "")
-  end
+  local env = connections.env(conn)
   vim.system(
     { config.binary },
     {

@@ -10,6 +10,7 @@
 :DbliteRun	dblite.txt	/*:DbliteRun*
 :DbliteRunAt	dblite.txt	/*:DbliteRunAt*
 :DbliteRunBulk	dblite.txt	/*:DbliteRunBulk*
+:DbliteSplit	dblite.txt	/*:DbliteSplit*
 :DbliteToggleOut	dblite.txt	/*:DbliteToggleOut*
 :DbliteUseConn	dblite.txt	/*:DbliteUseConn*
 :DbliteWatch	dblite.txt	/*:DbliteWatch*
@@ -26,6 +27,7 @@ dblite-completion	dblite.txt	/*dblite-completion*
 dblite-config	dblite.txt	/*dblite-config*
 dblite-connections	dblite.txt	/*dblite-connections*
 dblite-dbout	dblite.txt	/*dblite-dbout*
+dblite-dbout-split	dblite.txt	/*dblite-dbout-split*
 dblite-highlights	dblite.txt	/*dblite-highlights*
 dblite-history	dblite.txt	/*dblite-history*
 dblite-inline	dblite.txt	/*dblite-inline*
@@ -42,6 +44,14 @@ dblite-panel	dblite.txt	/*dblite-panel*
 dblite-panel-activity	dblite.txt	/*dblite-panel-activity*
 dblite-queries	dblite.txt	/*dblite-queries*
 dblite-quickstart	dblite.txt	/*dblite-quickstart*
+dblite-redis	dblite.txt	/*dblite-redis*
+dblite-redis-json	dblite.txt	/*dblite-redis-json*
+dblite-redis-keys	dblite.txt	/*dblite-redis-keys*
+dblite-redis-limits	dblite.txt	/*dblite-redis-limits*
+dblite-redis-script	dblite.txt	/*dblite-redis-script*
+dblite-redis-shapes	dblite.txt	/*dblite-redis-shapes*
+dblite-redis-watch	dblite.txt	/*dblite-redis-watch*
+dblite-redis-write	dblite.txt	/*dblite-redis-write*
 dblite-requirements	dblite.txt	/*dblite-requirements*
 dblite-watch	dblite.txt	/*dblite-watch*
 dblite-watch-behaviour	dblite.txt	/*dblite-watch-behaviour*

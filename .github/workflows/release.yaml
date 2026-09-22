@@ -31,8 +31,21 @@ jobs:
           distribution: 'graalvm'
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Linux runners have Docker, so the Redis integration tests can run for
+      # real during `mvn package` instead of being skipped.
+      - name: Start Redis
+        if: runner.os == 'Linux'
+        run: |
+          docker run -d --rm --name dblite-redis -p 6399:6379 redis:7-alpine
+          for _ in $(seq 1 30); do
+            docker exec dblite-redis redis-cli PING >/dev/null 2>&1 && break
+            sleep 1
+          done
+
       - name: Build native binary
         run: mvn -q clean package -Pnative
+        env:
+          DBLITE_REDIS_URL: ${{ runner.os == 'Linux' && 'redis://127.0.0.1:6399/0' || '' }}
 
       - name: Smoke test SQLite
         shell: bash
@@ -42,6 +55,30 @@ jobs:
           DB_URL="jdbc:sqlite:$db" bin/dblite <<<'INSERT INTO smoke VALUES (42)'
           output=$(DB_URL="jdbc:sqlite:$db" bin/dblite <<<'SELECT answer FROM smoke')
           [[ "$output" == *'"answer": 42'* ]]
+
+      - name: Smoke test Redis
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          export DB_URL='redis://127.0.0.1:6399/0'
+          bin/dblite <<<'SET smoke:answer 42'
+          bin/dblite <<<'HSET smoke:hash a 1 b 2'
+          keys=$(bin/dblite <<<'KEYS smoke:*')
+          echo "$keys"
+          grep -qF '"key": "smoke:answer"' <<<"$keys"
+          grep -qF '"type": "hash"' <<<"$keys"
+          # An exact key name must resolve without a keyspace scan.
+          bin/dblite <<<'KEYS smoke:answer' | grep -qF '"key": "smoke:answer"'
+          # A value containing a newline must survive the round trip intact.
+          # grep -F, not [[ == ]]: a backslash is an escape in a glob pattern.
+          bin/dblite <<<'SET smoke:nl "a\nb"'
+          bin/dblite <<<'GET smoke:nl' | grep -qF '"a\nb"'
+          bin/dblite <<<'HGETALL smoke:hash' | grep -qF '"field", "value"'
+          bin/dblite <<<'DEL smoke:answer' >/dev/null
+
+      - name: Stop Redis
+        if: always() && runner.os == 'Linux'
+        run: docker rm -f dblite-redis || true
 
       - name: Stage release asset
         run: cp bin/dblite dblite-${{ matrix.target }}

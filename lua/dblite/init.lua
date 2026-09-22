@@ -19,10 +19,23 @@ local _plugin_root = (function()
   end
 end)()
 
+-- "vertical"/"horizontal" describe the split line, not where the window lands,
+-- which is a coin flip to remember. The directional names are aliases for the
+-- same placements and are what :DbliteSplit accepts.
 local split_cmds = {
   vertical   = "botright vnew",
   horizontal = "botright new",
   tab        = "tabnew",
+  right      = "botright vnew",
+  left       = "topleft vnew",
+  below      = "botright new",
+  above      = "topleft new",
+}
+
+-- Which dimension a placement is sized by, and its config.split_size key.
+local split_axis = {
+  vertical = "width", right = "width", left = "width",
+  horizontal = "height", below = "height", above = "height",
 }
 
 local ns        = vim.api.nvim_create_namespace("dblite")
@@ -55,6 +68,8 @@ local state = {
   column_types    = {},  -- parallel array to columns: type name per column
   show_types      = nil, -- nil = use config default; true/false = user toggled
   fullscreen_tab  = nil, -- tabpage handle when dbout is fullscreen
+  split_dir       = nil, -- live placement; nil = fall back to config.split_dir
+  split_size      = {},  -- last size the user left dbout at, per axis
 }
 
 local function merge_into(target, source)
@@ -83,6 +98,7 @@ local EDITOR_ACTIONS = {
   { key = "binds",        desc = "edit bind parameters",    fn = function() M.edit_binds() end },
   { key = "connections",  desc = "edit connections file",   fn = function() M.edit_connections_file() end },
   { key = "fullscreen",   desc = "toggle dbout fullscreen", fn = function() M.toggle_fullscreen() end },
+  { key = "cycle_split",  desc = "flip dbout split",        fn = function() M.cycle_split() end },
   { key = "hover_bind",   desc = "hover bind value",        fn = function() M.hover_bind() end },
 }
 
@@ -99,6 +115,7 @@ local GLOBAL_ACTIONS = {
   { key = "toggle_binds", desc = "toggle binds window",     fn = function() M.toggle_binds() end },
   { key = "inspect",      desc = "inspect current page",    fn = function() M.inspect() end },
   { key = "fullscreen",   desc = "toggle dbout fullscreen", fn = function() M.toggle_fullscreen() end },
+  { key = "cycle_split",  desc = "flip dbout split",        fn = function() M.cycle_split() end },
   { key = "connections",  desc = "edit connections file",   fn = function() M.edit_connections_file() end },
 }
 
@@ -567,6 +584,10 @@ local function configure_result_buffer(bufnr)
     M.toggle_dbout()
   end, "dblite: toggle result window")
 
+  map(km.cycle_split, function()
+    M.cycle_split()
+  end, "dblite: flip result window split")
+
   local ek = (config.keymaps and config.keymaps.editor) or {}
   map(ek.fullscreen or "<leader>l", function()
     M.toggle_fullscreen()
@@ -589,6 +610,115 @@ local function apply_dbout_win_style(winnr)
   vim.wo[winnr].cursorline = st.cursorline == true
 end
 
+-- ── dbout placement ────────────────────────────────────────────────────────
+-- The placement is live state, not just config: `:DbliteSplit right` moves the
+-- result window mid-session, and toggling it away and back keeps both the
+-- direction and the size it was last left at. Both persist across restarts.
+
+local ui_state_path = vim.fn.stdpath("data") .. "/dblite/ui.json"
+
+local function load_ui_state()
+  local f = io.open(ui_state_path, "r")
+  if not f then return end
+  local raw = f:read("*a")
+  f:close()
+  if raw == "" then return end
+  local ok, data = pcall(vim.json.decode, raw)
+  if not ok or type(data) ~= "table" then return end
+  if type(data.split_dir) == "string" and split_cmds[data.split_dir] then
+    state.split_dir = data.split_dir
+  end
+  if type(data.split_size) == "table" then
+    state.split_size = data.split_size
+  end
+end
+
+local function save_ui_state()
+  local ok = pcall(function()
+    vim.fn.mkdir(vim.fn.fnamemodify(ui_state_path, ":h"), "p")
+    local f = assert(io.open(ui_state_path, "w"))
+    f:write(vim.json.encode({
+      split_dir  = state.split_dir,
+      split_size = state.split_size,
+    }))
+    f:close()
+  end)
+  return ok
+end
+
+-- The placement in effect right now: session override, then config, then a
+-- right-hand vertical split.
+local function current_split_dir()
+  local dir = state.split_dir or config.split_dir or "vertical"
+  return split_cmds[dir] and dir or "vertical"
+end
+
+-- Size for a placement: what the user last dragged it to, else the configured
+-- default. 0 or nil means "let nvim decide".
+local function split_size_for(dir)
+  local axis = split_axis[dir]
+  if not axis then return nil end
+  local remembered = state.split_size and state.split_size[axis]
+  if remembered and remembered > 0 then return axis, remembered end
+  local configured = (config.split_size or {})[axis]
+  if configured and configured > 0 then return axis, configured end
+  return axis, nil
+end
+
+-- Captures the size of a dbout window before it goes away, so bringing it back
+-- restores the size rather than snapping to the default.
+local function remember_dbout_size(winnr)
+  if not winnr or not vim.api.nvim_win_is_valid(winnr) then return end
+  local axis = split_axis[current_split_dir()]
+  if not axis then return end
+  state.split_size = state.split_size or {}
+  state.split_size[axis] = axis == "width"
+    and vim.api.nvim_win_get_width(winnr)
+    or  vim.api.nvim_win_get_height(winnr)
+end
+
+-- Hides every window showing dbout, remembering the size on the way out.
+local function hide_dbout_windows()
+  local bufnr = state.result_bufnr
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return end
+  local wins = vim.fn.win_findbuf(bufnr)
+  if #wins > 0 then remember_dbout_size(wins[1]) end
+  for _, winnr in ipairs(wins) do
+    pcall(vim.api.nvim_win_hide, winnr)
+  end
+end
+
+-- Sizes the current window for `dir` and pins that axis. Without the pin,
+-- 'winwidth'/'winheight' quietly claw columns back from dbout the moment the
+-- cursor returns to a now-narrow editor window, so a restored size would drift.
+local function size_dbout_win(dir)
+  local axis, size = split_size_for(dir)
+  if axis == "width" then
+    if size then vim.api.nvim_win_set_width(0, size) end
+    vim.wo.winfixwidth = true
+  elseif axis == "height" then
+    if size then vim.api.nvim_win_set_height(0, size) end
+    vim.wo.winfixheight = true
+  end
+end
+
+-- Opens dbout at the current placement and leaves the cursor where it was.
+-- `bufnr` nil means the split's own fresh buffer becomes the result buffer.
+local function open_dbout_win(bufnr)
+  local dir = current_split_dir()
+  vim.cmd(split_cmds[dir])
+  if bufnr then vim.api.nvim_win_set_buf(0, bufnr) end
+
+  size_dbout_win(dir)
+
+  apply_dbout_win_style(0)
+  local winnr = vim.api.nvim_get_current_win()
+  vim.cmd("wincmd p")
+  return winnr
+end
+
+load_ui_state()
+
 local function ensure_result_buffer()
   if state.result_bufnr and vim.api.nvim_buf_is_valid(state.result_bufnr) then
     local bufnr = state.result_bufnr
@@ -603,33 +733,18 @@ local function ensure_result_buffer()
     end
     if not visible_in_tab then
       -- close dbout windows in other tabs before opening here
-      for _, w in ipairs(wins) do
-        pcall(vim.api.nvim_win_hide, w)
-      end
-      vim.cmd(split_cmds[config.split_dir] or split_cmds.vertical)
-      vim.api.nvim_win_set_buf(0, bufnr)
-      local sz = config.split_size or {}
-      if config.split_dir == "vertical" and sz.width and sz.width > 0 then
-        vim.api.nvim_win_set_width(0, sz.width)
-      elseif config.split_dir == "horizontal" and sz.height and sz.height > 0 then
-        vim.api.nvim_win_set_height(0, sz.height)
-      end
-      apply_dbout_win_style(0)
-      vim.cmd("wincmd p")
+      hide_dbout_windows()
+      open_dbout_win(bufnr)
     end
     return bufnr
   end
 
-  vim.cmd(split_cmds[config.split_dir] or split_cmds.vertical)
+  local dir = current_split_dir()
+  vim.cmd(split_cmds[dir])
   local bufnr = vim.api.nvim_get_current_buf()
   configure_result_buffer(bufnr)
 
-  local sz = config.split_size or {}
-  if config.split_dir == "vertical" and sz.width and sz.width > 0 then
-    vim.api.nvim_win_set_width(0, sz.width)
-  elseif config.split_dir == "horizontal" and sz.height and sz.height > 0 then
-    vim.api.nvim_win_set_height(0, sz.height)
-  end
+  size_dbout_win(dir)
 
   apply_dbout_win_style(0)
   vim.cmd("wincmd p")
@@ -694,7 +809,7 @@ local function execute_core(query, script)
     state.current_job = nil
   end
 
-  local bind_names = binds_mod.parse_names(query)
+  local bind_names = binds_mod.names_for(state.active_conn, query)
 
   local function do_run(q)
     state.last_elapsed = nil
@@ -895,7 +1010,7 @@ local function start_watch(query, label, spec_str)
   end
 
   local final_q    = query
-  local bind_names = binds_mod.parse_names(query)
+  local bind_names = binds_mod.names_for(state.active_conn, query)
   if #bind_names > 0 then
     local file_binds = binds_mod.flatten(binds_mod.load_file())
     local missing = vim.tbl_filter(function(n) return file_binds[n] == nil end, bind_names)
@@ -1073,7 +1188,7 @@ function M.run_async(format, path, range)
 
   -- Resolve binds before we prompt for a path, so missing binds fail fast.
   local final_q = query
-  local bind_names = binds_mod.parse_names(query)
+  local bind_names = binds_mod.names_for(state.active_conn, query)
   if #bind_names > 0 then
     local file_binds = binds_mod.flatten(binds_mod.load_file())
     local missing = vim.tbl_filter(function(n) return file_binds[n] == nil end, bind_names)
@@ -1283,6 +1398,38 @@ local function edit_conn_by_name(name)
     return
   end
 
+  if conn.type == "redis" then
+    -- Asked in the order they are shown in the panel; a value that will not
+    -- parse keeps the current one rather than silently becoming a default.
+    local updates = {
+      name = prompt("Name", conn.name),
+      host = prompt("Host", conn.host),
+      port = tonumber(prompt("Port", conn.port or 6379)) or conn.port or 6379,
+      db   = tonumber(prompt("Database index", conn.db or 0)) or conn.db or 0,
+      user = prompt("User", conn.user or ""),
+    }
+    if updates.user == "" then updates.user = nil end
+    local tls_s = prompt("TLS (y/n)", conn.tls and "y" or "n")
+    updates.tls = (tostring(tls_s):lower():sub(1, 1) == "y") or nil
+    local pw = vim.fn.inputsecret("Password (blank to keep, '-' to clear): ")
+    if pw == "-" then
+      updates.password = nil
+    elseif pw ~= "" then
+      updates.password = pw
+    end
+    local ok, result = pcall(connections.update, conn.id, updates)
+    if not ok then
+      vim.notify("\ndblite: " .. tostring(result), vim.log.levels.ERROR)
+      return
+    end
+    if state.active_conn and state.active_conn.id == conn.id then
+      state.active_conn = result
+    end
+    vim.notify("\ndblite: updated '" .. updates.name .. "'", vim.log.levels.INFO)
+    panel.refresh()
+    return
+  end
+
   local default_port = conn.type == "sqlserver" and 1433 or 1521
   local db_label     = conn.type == "sqlserver" and "Database" or "Service"
   local db_current   = conn.type == "sqlserver" and conn.database or conn.service
@@ -1357,7 +1504,7 @@ vim.api.nvim_create_user_command("DbliteAddConn", function(opts)
     fields = parsed
   else
     -- Ask for URI first; blank means fall through to field-by-field
-    local uri_input = vim.fn.input("URI (oracle://..., sqlserver://..., or sqlite://...) or blank for manual: ")
+    local uri_input = vim.fn.input("URI (oracle://, sqlserver://, sqlite://, redis://) or blank for manual: ")
     if uri_input ~= "" then
       local parsed, err = connections.parse_uri(uri_input)
       if not parsed then
@@ -1372,16 +1519,34 @@ vim.api.nvim_create_user_command("DbliteAddConn", function(opts)
   if name == "" then return end
 
   if not fields then
-    local type_s = vim.fn.input("Type [oracle/sqlserver/sqlite]: ")
+    local type_s = vim.fn.input("Type [oracle/sqlserver/sqlite/redis]: ")
     type_s = type_s ~= "" and type_s or "oracle"
-    if type_s ~= "oracle" and type_s ~= "sqlserver" and type_s ~= "sqlite" then
-      vim.notify("\ndblite: type must be 'oracle', 'sqlserver', or 'sqlite'", vim.log.levels.ERROR)
+    if type_s ~= "oracle" and type_s ~= "sqlserver" and type_s ~= "sqlite" and type_s ~= "redis" then
+      vim.notify("\ndblite: type must be 'oracle', 'sqlserver', 'sqlite', or 'redis'", vim.log.levels.ERROR)
       return
     end
     if type_s == "sqlite" then
       local path = vim.fn.input("Database path: ", "", "file")
       if path == "" then return end
       fields = { type = type_s, path = path }
+    elseif type_s == "redis" then
+      -- Everything but the host is optional: Redis is commonly unauthenticated.
+      local host = vim.fn.input("Host [127.0.0.1]: ")
+      host = host ~= "" and host or "127.0.0.1"
+      local port_s = vim.fn.input("Port [6379]: ")
+      local db_s   = vim.fn.input("Database index [0]: ")
+      local user   = vim.fn.input("User (blank for none): ")
+      local password = vim.fn.inputsecret("Password (blank for none, or $ENV_VAR): ")
+      local tls_s  = vim.fn.input("TLS (rediss) [y/N]: ")
+      fields = {
+        type     = "redis",
+        host     = host,
+        port     = tonumber(port_s ~= "" and port_s or "6379"),
+        db       = tonumber(db_s ~= "" and db_s or "0"),
+        user     = user ~= "" and user or nil,
+        password = password ~= "" and password or nil,
+        tls      = (tls_s:lower():sub(1, 1) == "y") or nil,
+      }
     else
       local default_port = type_s == "sqlserver" and "1433" or "1521"
       local host = vim.fn.input("Host: ")
@@ -1408,7 +1573,7 @@ vim.api.nvim_create_user_command("DbliteAddConn", function(opts)
     end
   else
     -- URI path: password may be missing — give the user a chance to set it
-    if fields.type ~= "sqlite" and (fields.password or "") == "" then
+    if fields.type ~= "sqlite" and fields.type ~= "redis" and (fields.password or "") == "" then
       fields.password = vim.fn.inputsecret("Password (or $ENV_VAR, leave blank to set later): ")
     end
   end
@@ -1436,6 +1601,11 @@ vim.api.nvim_create_user_command("DbliteListConns", function()
     if c.type == "sqlite" then
       table.insert(lines, string.format("  %-20s  [%-10s]  %s%s",
         c.name, c.type, c.path or "?", active))
+    elseif c.type == "redis" then
+      table.insert(lines, string.format("  %-20s  [%-10s]  %s%s:%d/%d%s",
+        c.name, c.type,
+        (c.user and c.user ~= "") and (c.user .. "@") or "",
+        c.host or "?", c.port or 6379, c.db or 0, active))
     else
       local db_val  = (c.type == "sqlserver") and c.database or c.service
       local default_port = (c.type == "sqlserver") and 1433 or 1521
@@ -1487,23 +1657,49 @@ end, { nargs = 1, complete = complete_name })
 
 function M.toggle_dbout()
   if not state.result_bufnr or not vim.api.nvim_buf_is_valid(state.result_bufnr) then return end
-  local wins = vim.fn.win_findbuf(state.result_bufnr)
-  if #wins > 0 then
-    for _, winnr in ipairs(wins) do
-      pcall(vim.api.nvim_win_hide, winnr)
-    end
+  if #vim.fn.win_findbuf(state.result_bufnr) > 0 then
+    hide_dbout_windows()
+    save_ui_state()   -- keep a size the user dragged to across restarts
   else
-    vim.cmd(split_cmds[config.split_dir] or split_cmds.vertical)
-    vim.api.nvim_win_set_buf(0, state.result_bufnr)
-    local sz = config.split_size or {}
-    if config.split_dir == "vertical" and sz.width and sz.width > 0 then
-      vim.api.nvim_win_set_width(0, sz.width)
-    elseif config.split_dir == "horizontal" and sz.height and sz.height > 0 then
-      vim.api.nvim_win_set_height(0, sz.height)
-    end
-    apply_dbout_win_style(0)
-    vim.cmd("wincmd p")
+    open_dbout_win(state.result_bufnr)
   end
+end
+
+-- :DbliteSplit <right|left|below|above|tab> — move the result window now, and
+-- remember the placement for the next toggle and the next session.
+function M.set_split_dir(dir)
+  dir = vim.trim(dir or "")
+  if dir == "" then
+    vim.notify("dblite: current split is '" .. current_split_dir() .. "'", vim.log.levels.INFO)
+    return
+  end
+  if not split_cmds[dir] then
+    vim.notify("dblite: split must be one of right, left, below, above, tab", vim.log.levels.ERROR)
+    return
+  end
+
+  local was_open = state.result_bufnr
+    and vim.api.nvim_buf_is_valid(state.result_bufnr)
+    and #vim.fn.win_findbuf(state.result_bufnr) > 0
+
+  if was_open then hide_dbout_windows() end
+  state.split_dir = dir
+  save_ui_state()
+  if was_open then
+    open_dbout_win(state.result_bufnr)
+    -- Column truncation depends on the window width, which just changed.
+    state.widths = compute_widths(state.rows, state.columns)
+    render_page()
+  end
+  vim.notify("dblite: split → " .. dir, vim.log.levels.INFO)
+end
+
+-- Flip between a right-hand and a below split. Long JSON values read better in
+-- a tall narrow pane and wide result grids in a short wide one, so this is the
+-- switch worth having on a key.
+function M.cycle_split()
+  local horizontal = split_axis[current_split_dir()] == "height"
+  M.set_split_dir(horizontal and "right" or "below")
 end
 
 function M.toggle_fullscreen()
@@ -1527,6 +1723,16 @@ function M.toggle_fullscreen()
 end
 
 vim.api.nvim_create_user_command("DbliteToggleOut", M.toggle_dbout, {})
+
+vim.api.nvim_create_user_command("DbliteSplit", function(opts)
+  M.set_split_dir(opts.args)
+end, {
+  nargs    = "?",
+  complete = function(arg_lead)
+    return vim.tbl_filter(function(k) return k:sub(1, #arg_lead) == arg_lead end,
+      { "right", "left", "below", "above", "tab" })
+  end,
+})
 
 -- :DbliteExport <csv|json> [path] — write the full result set to a file
 vim.api.nvim_create_user_command("DbliteExport", function(opts)
@@ -1881,6 +2087,13 @@ end
 -- :Dblite load — parse a SQL*Loader control block in the buffer, read its CSV,
 -- and preview the generated INSERTs before committing them (script mode).
 function M.load(opts)
+  -- LOAD DATA generates INSERT statements, which have no Redis equivalent.
+  if state.active_conn and state.active_conn.type == "redis" then
+    vim.notify("dblite: :Dblite load is SQL-only; use a Redis script with SET/HSET instead",
+      vim.log.levels.ERROR)
+    return
+  end
+
   local first, last
   if opts and opts.range and opts.range > 0 then
     first, last = opts.line1, opts.line2
@@ -2095,6 +2308,7 @@ do
     end,
     binds         = function() M.edit_binds() end,
     load          = function() M.load() end,
+    split         = function(a) M.set_split_dir(a[2]) end,
   }
 
   local function complete(arg_lead, cmd_line)
@@ -2102,7 +2316,7 @@ do
     local n = #tokens
     if n == 2 then
       return vim.tbl_filter(function(k) return k:sub(1, #arg_lead) == arg_lead end,
-        { "run", "watch", "jobs", "toggle", "conn", "build", "inspect", "export", "binds", "load" })
+        { "run", "watch", "jobs", "toggle", "conn", "build", "inspect", "export", "binds", "load", "split" })
     elseif n == 3 then
       local sub = tokens[2]
       local opts = {
@@ -2114,6 +2328,7 @@ do
         conn    = { "add", "list", "use", "edit", "del", "file", "pick" },
         inspect = { "json", "table", "csv" },
         export  = { "csv", "json" },
+        split   = { "right", "left", "below", "above", "tab" },
       }
       local choices = opts[sub] or {}
       return vim.tbl_filter(function(k) return k:sub(1, #arg_lead) == arg_lead end, choices)

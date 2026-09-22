@@ -77,7 +77,7 @@ local function prepare(opts)
   -- API call only sees it when it asks for it; either way we fail with the
   -- missing names rather than popping open the binds editor.
   local sql = opts.sql
-  if next(binds_mod.parse_names(sql) or {}) ~= nil then
+  if next(binds_mod.names_for(conn, sql) or {}) ~= nil then
     local values = opts.binds_file and binds_mod.flatten(binds_mod.load_file()) or {}
     for k, v in pairs(opts.binds or {}) do values[k] = v end
     local missing = binds_mod.missing(sql, values)

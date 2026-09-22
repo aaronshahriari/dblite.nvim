@@ -29,6 +29,7 @@ local type_labels = {
   oracle    = "Oracle",
   sqlserver = "SQL Server",
   sqlite    = "SQLite",
+  redis     = "Redis",
 }
 
 local function build_lines()

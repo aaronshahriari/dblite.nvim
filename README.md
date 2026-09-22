@@ -4,7 +4,7 @@
 
 # dblite.nvim
 
-Query **Oracle**, **SQL Server**, and **SQLite** from Neovim — write SQL in any buffer, run it, and page results in a split.
+Query **Oracle**, **SQL Server**, **SQLite**, and **Redis** from Neovim — write SQL (or Redis commands) in any buffer, run it, and page results in a split.
 
 ![Neovim 0.11+](https://img.shields.io/badge/Neovim-0.11+-4c566a?style=flat-square&logo=neovim&logoColor=white)
 ![GraalVM native](https://img.shields.io/badge/GraalVM-native%20·%20no%20JVM-4c566a?style=flat-square)
@@ -42,6 +42,7 @@ The database work runs in a native binary (GraalVM), so there's **no JVM at runt
 
 - **Run from any buffer** — the whole buffer, or just the statement under the cursor (treesitter-aware).
 - **Paginated result split** with column-type annotations, query timing, and a per-session result history you can page back through.
+- **Redis, Valkey and Dragonfly** over `redis://` and `rediss://` — replies land in the same grid (a hash becomes field/value, a sorted set member/score), so paging, export, history and watch all work unchanged. No `redis-cli` needed; the protocol is spoken directly, so values with newlines, spaces or binary survive intact.
 - **Named connections** with `$ENV_VAR` password references, stored at `chmod 600`.
 - **Typed bind parameters** from a `dblite.binds.json` file — numbers, quoted strings, and raw SQL expressions.
 - **Export** the entire result set (not just the current page) to CSV or JSON.
@@ -147,17 +148,20 @@ Connections live at `~/.local/share/nvim/dblite/connections.json` (`chmod 600`).
 
 Name arguments support tab-completion.
 
-**URI formats** — port defaults to `1521` (Oracle) / `1433` (SQL Server) when omitted:
+**URI formats** — port defaults to `1521` (Oracle) / `1433` (SQL Server) / `6379` (Redis) when omitted:
 
 ```
 oracle://user[:password]@host[:port]/service
 sqlserver://user[:password]@host[:port]/database
 sqlite:///absolute/path.db
+redis://[[user][:password]@]host[:port][/db]     # rediss:// for TLS
 ```
 
 SQLite paths must point to an existing regular file. `:memory:` is unsupported because each command starts a new process and database connection. Run `:DbliteAddConn` without an argument to enter a URI interactively; leave that prompt blank for field-by-field setup (SQLite asks for type and database path). URI setup still prompts for a connection name.
 
 SQL Server connections use `encrypt=true;trustServerCertificate=true` for broad compatibility with local dev and Azure SQL.
+
+Redis needs only a host — auth is optional, and the database is an index (default `0`) rather than a name. Credentials travel in the environment rather than in the URL, so nothing has to be percent-encoded once saved; a password in a URI *is* percent-decoded when you paste it (`redis://:p%40ss@host` → `p@ss`). Both a bare password and an ACL `user:password` pair work. `rediss://` uses your system truststore, so a managed Redis with a public CA works with no extra setup.
 
 ## Running queries
 
@@ -166,6 +170,7 @@ SQL Server connections use `encrypt=true;trustServerCertificate=true` for broad 
 | `:Dblite run` | Run the entire buffer |
 | `:Dblite run at` | Run the statement under the cursor (treesitter-aware) |
 | `:Dblite toggle dbout` | Show/hide the result window (query keeps running if in-flight) |
+| `:DbliteSplit <dir>` | Move the result window: `right`, `left`, `below`, `above`, `tab` |
 | `:Dblite inspect [json\|table\|csv]` | Open the current page untruncated in a scratch window |
 | `:Dblite export <csv\|json> [path]` | Write the **entire** result set to a file |
 | `:Dblite run bulk <csv\|json> [path]` | Run the current query **in the background**, streaming the full result straight to a file |
@@ -189,6 +194,103 @@ Trailing semicolons are stripped automatically. The legacy `:DbliteRun`, `:Dblit
 `<C-c>` also cancels from any buffer while a query runs — dblite sets it globally for the duration and restores your mapping afterward.
 
 ## More
+
+<details>
+<summary><b>Redis, Valkey & Dragonfly</b></summary>
+
+Pick a Redis connection and the buffer becomes a Redis command buffer — same keys, same result grid, same everything above it.
+
+```redis
+KEYS user:*
+HGETALL user:1042
+ZRANGE leaderboard 0 -1 WITHSCORES
+INFO replication
+```
+
+**Finding keys.** `KEYS <pattern>` is served by a full `SCAN` cursor loop rather than the real (server-blocking) `KEYS` command, so it is safe to run anywhere. Results are de-duplicated, since `SCAN` may hand back the same key more than once:
+
+```
+key                | type   | ttl | size
+-------------------+--------+-----+-----
+user:1042          | hash   |     | 7
+session:a83f-2291  | string | 900 | 1204
+queue:jobs         | list   |     | 4
+```
+
+`ttl` is remaining seconds, blank when the key has no expiry. `size` is bytes for a string and element count for everything else — the number you want when hunting for outliers.
+
+A pattern with no glob metacharacters (`*`, `?`, `[`) is a key *name*, so it skips `SCAN` entirely and resolves in one round trip. Pasting a full key like `KEYS session:a83f-2291` is O(1), not a keyspace walk.
+
+Use `SCAN` itself if you want the raw cursor semantics; it is passed through untouched.
+
+**How replies land in the grid:**
+
+| Reply | Columns |
+|---|---|
+| `HGETALL`, `CONFIG GET`, any RESP3 map | `field` · `value` |
+| `ZRANGE … WITHSCORES`, `ZPOPMIN`/`ZPOPMAX` | `member` · `score` (a real number) |
+| `LRANGE`, `SMEMBERS`, any array | `index` · `value` |
+| `INFO` | `section` · `field` · `value` |
+| `GET`, `TTL`, anything scalar | `result` |
+| `KEYS` | `key` · `type` · `ttl` · `size` |
+
+Nested replies (`XRANGE`, `CLUSTER SLOTS`) keep their shape as JSON inside the cell, ready for `gi`.
+
+**JSON.** A value that is a JSON document is tagged `json` in the column types — press `d` to see the tag, `gi` to expand it. The inspect view decodes JSON-inside-a-string recursively, so nested payloads unwrap into real structure rather than a wall of escapes. `JSON.GET` rides the same path.
+
+A value holding **JSONL** expands to one row per record, so paging and export operate on records instead of one giant cell:
+
+```
+line | value
+-----+------------------
+0    | {"id":1,"k":"a"}
+1    | {"id":2,"k":"b"}
+```
+
+**Watching.** `SCAN` gives no consistency guarantee — a key added or removed mid-scan may or may not appear — which is why a manual refresh is a real habit and not paranoia. `:Dblite watch` automates it:
+
+```vim
+:Dblite watch every=5s        " on LLEN queue:jobs — live queue depth
+:Dblite watch every=30s       " on INFO replication — replication lag, diffed
+```
+
+**Scripts.** In script mode (`:Dblite run script`) one command per line, `#` comments ignored — so a purge or cache-warm routine can live in a file you commit.
+
+**Writing** is done by writing the command, the same way you would write an `UPDATE` rather than editing a result cell:
+
+```redis
+HSET user:1042 email new@example.com
+EXPIRE session:a83f 3600
+DEL session:expired:a83f
+```
+
+Because the protocol is length-prefixed, values containing newlines, spaces, commas or quotes round-trip exactly. Quote them as you would in `redis-cli` — `"a\nb"` for an escape, `'{"a": 1}'` for a JSON literal.
+
+**Not supported yet:** `redis+cluster://` and `redis+sentinel://`. Bind parameters are a SQL feature and are switched off for Redis — otherwise every colon-namespaced key (`queue:jobs`) would read as a missing `:jobs` parameter. `:Dblite load` is SQL-only.
+
+</details>
+
+<details>
+<summary><b>Where the result window opens</b></summary>
+
+`split_dir` sets the default placement; `:DbliteSplit` changes it live:
+
+```vim
+:DbliteSplit right     " beside the editor — good for long JSON values
+:DbliteSplit below     " under the editor — good for wide grids
+:DbliteSplit left | above | tab
+:DbliteSplit           " report the current placement
+```
+
+`right`/`left`/`below`/`above` are the unambiguous names; the older `vertical` (= right) and `horizontal` (= below) still work.
+
+If dbout is open it moves immediately and re-renders at the new width; otherwise the placement applies next time it opens. Either way it is **remembered** — for the next toggle and the next session, along with any size you dragged it to. `:Dblite split right` is the same command, and `cycle_split` (unmapped by default) flips between right and below:
+
+```lua
+keymaps = { editor = { cycle_split = '<leader>ds' } }
+```
+
+</details>
 
 <details>
 <summary><b>Bind parameters</b></summary>
@@ -512,9 +614,9 @@ binary's own wire format. `res.values` gives the same rows positionally, and
 
 | option | default | |
 | --- | --- | --- |
-| `sql` | — | statement to run (required) |
+| `sql` | — | statement to run — a Redis command on a Redis connection (required) |
 | `conn` | — | name of a saved connection (required) |
-| `binds` | `{}` | values for `:name` references |
+| `binds` | `{}` | values for `:name` references (SQL only; ignored for Redis) |
 | `binds_file` | `false` | also read `dblite.binds.json` from the cwd |
 | `max_rows` | `config.max_rows` | row cap; `0` = uncapped |
 | `script` | `false` | run as a multi-statement script |
@@ -548,6 +650,8 @@ db.edit_connections_file() -- open connections JSON for direct editing
 db.open_panel()            -- open the panel
 db.close_panel()           -- close the panel
 db.is_panel_open()         -- true/false
+db.set_split_dir(dir)      -- move dbout: 'right'|'left'|'below'|'above'|'tab'
+db.cycle_split()           -- flip dbout between right and below
 ```
 
 </details>
@@ -558,7 +662,7 @@ db.is_panel_open()         -- true/false
 
 ```lua
 require('dblite').setup({
-  split_dir         = 'horizontal', -- 'vertical' | 'horizontal' | 'tab'
+  split_dir         = 'horizontal', -- 'right' | 'left' | 'below' | 'above' | 'tab'
   page_size         = 100,          -- rows per page
   max_rows          = 10000,        -- hard cap on rows returned
   max_col_width     = 50,           -- truncate wider cells; 0 = no limit
@@ -573,14 +677,16 @@ require('dblite').setup({
 
 ```lua
 require('dblite').setup({
-  split_dir      = 'horizontal',  -- 'vertical' | 'horizontal' | 'tab'
-  split_size     = { width = 80, height = 20 },
+  split_dir      = 'horizontal',  -- 'right' | 'left' | 'below' | 'above' | 'tab'
+                                  -- ('vertical' = right, 'horizontal' = below)
+                                  -- change live with :DbliteSplit; it is remembered
+  split_size     = { width = 80, height = 20 },  -- defaults; a size you drag to is remembered
   page_size      = 100,           -- rows per page in the result buffer
   max_rows       = 10000,         -- hard cap on rows returned
   max_col_width  = 50,            -- truncate cells wider than this; 0 = no limit
   max_history    = 20,            -- past query results to keep; 0 = unlimited
   show_column_types = false,      -- show [TYPE] next to column headers by default
-  filetypes      = { 'sql', 'plsql', 'mysql', 'sqlite' }, -- buffers dblite attaches to (editor keymaps + on_attach)
+  filetypes      = { 'sql', 'plsql', 'mysql', 'sqlite', 'redis' }, -- buffers dblite attaches to (editor keymaps + on_attach)
   on_attach      = nil,           -- function(bufnr) run per SQL buffer for custom buffer-local keybinds
   filetype       = '',            -- filetype for the result buffer ('' = no highlighting)
   flash_timeout  = 2000,          -- ms to hold the query highlight; 0 = hold until results
@@ -678,6 +784,7 @@ require('dblite').setup({
       binds        = '<leader>b', -- toggle dblite.binds.json split
       connections  = '',          -- open the connections JSON file
       fullscreen   = '<leader>l', -- toggle dbout fullscreen
+      cycle_split  = '',          -- flip dbout between right and below
       hover_bind   = 'K',         -- hover the bind value under the cursor
     },
     panel = { select = '<CR>', edit = 'cw', close = 'q', toggle = '' },
@@ -707,7 +814,7 @@ require('dblite').setup({
 })
 ```
 
-Editor keymaps remain **buffer-local** and are set only in the buffers listed in `filetypes` (default `sql`, `plsql`, `mysql`, `sqlite`), so they never fire in unrelated buffers or windows. Use them for SQL-buffer-only actions:
+Editor keymaps remain **buffer-local** and are set only in the buffers listed in `filetypes` (default `sql`, `plsql`, `mysql`, `sqlite`, `redis`), so they never fire in unrelated buffers or windows. Use them for SQL-buffer-only actions:
 
 ```lua
 require('dblite').setup({

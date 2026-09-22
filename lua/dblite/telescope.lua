@@ -14,6 +14,7 @@ local type_labels = {
   oracle    = "Oracle",
   sqlserver = "SQL Server",
   sqlite    = "SQLite",
+  redis     = "Redis",
 }
 
 function M.setup(opts)
@@ -28,6 +29,11 @@ end
 
 local function target_str(c)
   if c.type == "sqlite" then return c.path or "?" end
+  if c.type == "redis" then
+    return string.format("%s%s:%d/%d",
+      (c.user and c.user ~= "") and (c.user .. "@") or "",
+      c.host or "", c.port or 6379, c.db or 0)
+  end
   local db_val       = (c.type == "sqlserver") and c.database or c.service
   local default_port = (c.type == "sqlserver") and 1433 or 1521
   return string.format("%s@%s:%d/%s",
@@ -42,6 +48,18 @@ local function detail_lines(c)
       "Name      " .. (c.name or ""),
       "Type      SQLite",
       "Path      " .. (c.path or ""),
+    }
+  end
+  if c.type == "redis" then
+    return {
+      "Name      " .. (c.name or ""),
+      "Type      Redis",
+      "Host      " .. (c.host or ""),
+      "Port      " .. tostring(c.port or 6379),
+      "Database  " .. tostring(c.db or 0),
+      "User      " .. (c.user or "(none)"),
+      "Password  " .. ((c.password ~= nil and c.password ~= "") and "********" or "(none)"),
+      "TLS       " .. (c.tls and "yes" or "no"),
     }
   end
   local default_port = (c.type == "sqlserver") and 1433 or 1521

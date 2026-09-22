@@ -153,6 +153,12 @@ function source:get_completions(ctx, callback)
   local bufname  = vim.api.nvim_buf_get_name(ctx.bufnr)
   local is_binds = bufname:match("dblite%.binds%.json$") ~= nil
 
+  -- Redis has no SQL catalog, so every suggestion below would be noise.
+  if conn and conn.type == "redis" then
+    callback({ is_incomplete_forward = false, is_incomplete_backward = false, items = {} })
+    return
+  end
+
   -- ── dblite.binds.json: suggest table.column dotted keys ──────────────
   if is_binds then
     if not conn then

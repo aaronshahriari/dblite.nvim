@@ -182,6 +182,10 @@ local inline      = require("dblite.inline")
 
 local db_path = vim.fn.tempname() .. ".sqlite"
 assert(io.open(db_path, "w")):close()
+-- Drop any entry a previous (possibly aborted) run left behind, so the spec is
+-- re-runnable rather than passing exactly once.
+local stale = connections.get_by_name("spec_watch")
+if stale then connections.delete(stale.id) end
 connections.add({ name = "spec_watch", type = "sqlite", path = db_path })
 
 local function sql(stmt)
@@ -290,3 +294,7 @@ assert(not watch.has_running(), "nothing left polling")
 os.remove(db_path)
 
 print("watch_spec: all assertions passed")
+
+-- Leave no trace in the user's saved connections.
+local added = connections.get_by_name("spec_watch")
+if added then connections.delete(added.id) end

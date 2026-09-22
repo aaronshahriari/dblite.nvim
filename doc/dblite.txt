@@ -1,4 +1,4 @@
-*dblite.txt*	Query Oracle, SQL Server, and SQLite databases from Neovim
+*dblite.txt*	Query Oracle, SQL Server, SQLite and Redis from Neovim
 
 Author:  Aaron Shahriari
 License: see repository
@@ -13,18 +13,19 @@ CONTENTS						*dblite* *dblite.nvim*
 	5. Connections .................. |dblite-connections|
 	6. Connections panel ............ |dblite-panel|
 	7. Running queries .............. |dblite-queries|
-	8. Result buffer (dbout) ........ |dblite-dbout|
-	9. Result history ............... |dblite-history|
-	10. Column types ................ |dblite-column-types|
-	11. Inspect ..................... |dblite-inspect|
-	12. Bind parameters ............. |dblite-binds|
-	13. Autocomplete ................ |dblite-completion|
-	14. Commands .................... |dblite-commands|
-	15. Keymaps ..................... |dblite-keymaps|
-	16. Configuration ............... |dblite-config|
-	17. Lua API ..................... |dblite-api|
-	18. Inline queries .............. |dblite-inline|
-	19. Highlights .................. |dblite-highlights|
+	8. Redis ........................ |dblite-redis|
+	9. Result buffer (dbout) ........ |dblite-dbout|
+	10. Result history .............. |dblite-history|
+	11. Column types ................ |dblite-column-types|
+	12. Inspect ..................... |dblite-inspect|
+	13. Bind parameters ............. |dblite-binds|
+	14. Autocomplete ................ |dblite-completion|
+	15. Commands .................... |dblite-commands|
+	16. Keymaps ..................... |dblite-keymaps|
+	17. Configuration ............... |dblite-config|
+	18. Lua API ..................... |dblite-api|
+	19. Inline queries .............. |dblite-inline|
+	20. Highlights .................. |dblite-highlights|
 
 ==============================================================================
 1. INTRODUCTION						*dblite-introduction*
@@ -34,7 +35,9 @@ results in a split. It manages named connections (with environment-variable
 support for credentials), navigates a history of past results, substitutes
 bind parameters, and offers context-aware SQL completion via blink.cmp.
 
-Supported databases: Oracle, SQL Server, and SQLite.
+Supported databases: Oracle, SQL Server, SQLite, and Redis (including Valkey
+and Dragonfly). On a Redis connection the buffer holds Redis commands instead
+of SQL; replies land in the same result grid. See |dblite-redis|.
 
 Queries are executed by a native helper binary (`dblite`) that ships with the
 plugin or is downloaded from GitHub Releases. Queries run asynchronously, so
@@ -126,13 +129,23 @@ URI formats ~
 	oracle://user[:password]@host[:port]/service
 	sqlserver://user[:password]@host[:port]/database
 	sqlite:///absolute/path.db
+	redis://[[user][:password]@]host[:port][/db]
+	rediss://[[user][:password]@]host[:port][/db]      (TLS)
 <
-Port defaults to 1521 for Oracle and 1433 for SQL Server when omitted.
+Port defaults to 1521 for Oracle, 1433 for SQL Server and 6379 for Redis when
+omitted.
 SQL Server connections use `encrypt=true;trustServerCertificate=true` for
 broad compatibility with local dev and Azure SQL.
 
 SQLite paths must point to an existing regular file. `:memory:` is unsupported
 because each command starts a new process and database connection.
+
+Redis requires only a host: authentication is optional and the database is an
+index (default 0) rather than a name. Both a bare password and an ACL
+`user:password` pair are accepted. Percent-escapes in a URI's userinfo are
+decoded, so `redis://:p%40ss@host` stores the password `p@ss`. Credentials are
+passed to the helper binary through the environment rather than embedded in the
+URL. `rediss://` validates against the system truststore. See |dblite-redis|.
 
 With no argument, |:DbliteAddConn| first prompts for a URI. Leave it blank for
 field-by-field setup; SQLite then asks for the type and database path. URI
@@ -350,13 +363,143 @@ Not supported: per-column datatypes/transforms, positional fields, direct
 path, and inline `BEGINDATA` (`INFILE *`).
 
 ==============================================================================
-8. RESULT BUFFER (dbout)				*dblite-dbout*
+8. REDIS						*dblite-redis*
+
+Redis, Valkey and Dragonfly are reached over `redis://` and `rediss://`. The
+protocol is spoken directly, so there is no `redis-cli` dependency and values
+containing newlines, spaces or binary survive a round trip intact.
+
+With a Redis connection active, the buffer holds Redis commands instead of
+SQL. Everything above the result grid — paging, |dblite-history|,
+|dblite-inspect|, export, |dblite-bulk| and |dblite-watch| — works unchanged.
+>
+	KEYS user:*
+	HGETALL user:1042
+	ZRANGE leaderboard 0 -1 WITHSCORES
+	INFO replication
+<
+FINDING KEYS						*dblite-redis-keys*
+
+`KEYS <pattern>` is served by a full SCAN cursor loop rather than the real
+(server-blocking) KEYS command, so it is safe to run against a live instance.
+SCAN may return the same key more than once; the listing de-duplicates.
+>
+	key                | type   | ttl | size
+	-------------------+--------+-----+-----
+	user:1042          | hash   |     | 7
+	session:a83f-2291  | string | 900 | 1204
+	queue:jobs         | list   |     | 4
+<
+`ttl` is the remaining seconds, blank when the key has no expiry set. `size` is
+bytes for a string and the element count for every collection type.
+
+A pattern containing no glob metacharacters (`*`, `?`, `[`) is a key name, not
+a search, so it skips SCAN entirely and resolves in a single round trip.
+Pasting a full key is O(1) rather than a full keyspace walk.
+
+SCAN itself is passed through untouched if you want the raw cursor semantics.
+
+Note that MATCH does not make a scan cheaper: Redis retrieves every key and
+applies the pattern afterwards. A narrow pattern reduces what crosses the wire,
+not the work the server does.
+
+REPLY SHAPES						*dblite-redis-shapes*
+
+	HGETALL, CONFIG GET, RESP3 map     field   · value
+	ZRANGE .. WITHSCORES, ZPOPMIN/MAX  member  · score (a number)
+	LRANGE, SMEMBERS, any array        index   · value
+	INFO                               section · field · value
+	GET, TTL, any scalar               result
+	KEYS                               key · type · ttl · size
+
+Nested replies (XRANGE, CLUSTER SLOTS) keep their structure as JSON within the
+cell, ready to expand with |dblite-inspect|.
+
+JSON							*dblite-redis-json*
+
+A value that is a JSON document is tagged `json` in the column types (see
+|dblite-column-types|). |dblite-inspect| decodes JSON-inside-a-string
+recursively, so nested payloads unwrap into real structure. `JSON.GET` uses the
+same path.
+
+A value holding JSONL expands to one row per record, so paging and export
+operate on records instead of one oversized cell:
+>
+	line | value
+	-----+------------------
+	0    | {"id":1,"k":"a"}
+	1    | {"id":2,"k":"b"}
+<
+WATCHING						*dblite-redis-watch*
+
+SCAN offers no consistency guarantee: a key added or removed during the scan
+may or may not appear. Re-running is therefore a genuine check, not a
+superstition, and |dblite-watch| automates it.
+>
+	:Dblite watch every=5s      " on LLEN queue:jobs
+	:Dblite watch every=30s     " on INFO replication
+<
+SCRIPTS							*dblite-redis-script*
+
+In script mode (`:Dblite run script`) each line is one command and lines
+beginning with `#` are comments, so a purge or cache-warm routine can live in a
+file you commit.
+
+WRITING							*dblite-redis-write*
+
+Write by writing the command, as you would write an UPDATE rather than editing
+a result cell:
+>
+	HSET user:1042 email new@example.com
+	EXPIRE session:a83f 3600
+	DEL session:expired:a83f
+<
+Arguments are quoted as in redis-cli: double quotes honour escapes (`\n`,
+`\t`, `\xHH`), single quotes are literal. A reply of `+OK` is reported as an
+executed statement; any other reply is shown in the grid.
+
+LIMITATIONS						*dblite-redis-limits*
+
+`redis+cluster://` and `redis+sentinel://` are not supported yet.
+
+Bind parameters (|dblite-binds|) are a SQL feature and are disabled on Redis
+connections: a colon-namespaced key such as `queue:jobs` is otherwise
+indistinguishable from a `:jobs` bind reference.
+
+`:Dblite load` (|dblite-load|) generates INSERT statements and is SQL-only.
+
+SQL completion is likewise suppressed, since there is no catalog to read.
+
+==============================================================================
+9. RESULT BUFFER (dbout)				*dblite-dbout*
 
 Query output appears in a scratch buffer called the "dbout". Its split
 direction and size are controlled by `split_dir` and `split_size`
 (see |dblite-config|). Toggle its visibility any time with
 |:DbliteToggleOut| or `:Dblite toggle dbout` — an in-flight query keeps
 running while hidden.
+
+PLACEMENT						*dblite-dbout-split*
+
+|:DbliteSplit| moves the result window without restarting anything: >
+
+	:DbliteSplit right	" beside the editor
+	:DbliteSplit below	" under the editor
+	:DbliteSplit left | above | tab
+	:DbliteSplit		" report the current placement
+<
+`right`, `left`, `below` and `above` are the unambiguous names; the older
+`vertical` (= right) and `horizontal` (= below) remain accepted.
+
+If dbout is open it moves immediately and re-renders at the new width;
+otherwise the placement takes effect the next time it opens. Either way it is
+remembered — across toggles and across sessions — together with any size you
+resized it to by hand. The sized axis is pinned ('winfixwidth' or
+'winfixheight') so opening other windows cannot reclaim it.
+
+`cycle_split` (see |dblite-keymaps|, unmapped by default) flips between a
+right-hand and a below split, which is useful when switching between long JSON
+values and wide result grids.
 
 The first line is a status line whose sections are configurable via
 `style.dbout.sections`. Available items: "history", "pagination",
@@ -384,7 +527,7 @@ truncation so wide values are fully visible; press it again to close the tab
 and return.
 
 ==============================================================================
-9. RESULT HISTORY					*dblite-history*
+10. RESULT HISTORY					*dblite-history*
 
 Every successful query is saved to a history ring. Navigate past results from
 inside the dbout buffer:
@@ -400,7 +543,7 @@ History size is controlled by `max_history` (default 20). Set it to 0 for
 unlimited.
 
 ==============================================================================
-10. COLUMN TYPES					*dblite-column-types*
+11. COLUMN TYPES					*dblite-column-types*
 
 Press `d` in the dbout buffer to toggle column type annotations. When enabled,
 each header shows the database type next to the column name: >
@@ -417,7 +560,7 @@ with `vim.api.nvim_set_hl()` or `style.dbout.column_type_hl`. >lua
 	})
 <
 ==============================================================================
-11. INSPECT						*dblite-inspect*
+12. INSPECT						*dblite-inspect*
 
 `gi` (or `:Dblite inspect`) opens the current result page in a scratch window
 with no column truncation. Three formats — tab-complete
@@ -436,7 +579,7 @@ themselves JSON strings so they nest cleanly instead of showing one escaped
 blob.
 
 ==============================================================================
-12. BIND PARAMETERS					*dblite-binds*
+13. BIND PARAMETERS					*dblite-binds*
 
 Bind parameters are referenced in SQL with a leading colon, e.g. `:status`,
 `:user_id`. Their values come from a `dblite.binds.json` file in the current
@@ -481,7 +624,7 @@ Add `"binds_file"` to `style.dbout.sections` to show a `binds` badge in the
 status line whenever dblite.binds.json exists in the cwd.
 
 ==============================================================================
-13. AUTOCOMPLETE					*dblite-completion*
+14. AUTOCOMPLETE					*dblite-completion*
 
 dblite ships a blink.cmp source providing context-aware SQL completions. Add
 it to your blink config: >lua
@@ -507,7 +650,7 @@ by |:DbliteUseConn|. For SQLite, completion covers tables and views in the
 `main` schema.
 
 ==============================================================================
-14. COMMANDS						*dblite-commands*
+15. COMMANDS						*dblite-commands*
 
 Unified entry point ~
 							*:Dblite*
@@ -525,6 +668,7 @@ Unified entry point ~
 :Dblite toggle panel		Toggle the connections panel.
 :Dblite toggle dbout		Toggle the result window.
 :Dblite toggle jobs		Toggle the activity panel.
+:Dblite split <dir>		Move the result window (|:DbliteSplit|).
 :Dblite conn add [uri]		Add a connection.
 :Dblite conn list		List connections.
 :Dblite conn use <name>		Set the active connection.
@@ -547,6 +691,13 @@ Individual commands ~
 :DbliteRunAt			Run the statement under the cursor.
 							*:DbliteToggleOut*
 :DbliteToggleOut		Toggle the result (dbout) window.
+							*:DbliteSplit*
+:DbliteSplit [dir]		Move the result window. `dir` is one of
+				right, left, below, above, tab (or the older
+				vertical/horizontal). With no argument, report
+				the current placement. The choice is
+				remembered across sessions.
+				See |dblite-dbout-split|.
 							*:DbliteRunBulk*
 :DbliteRunBulk <fmt> [path]	Run the current query as a background bulk
 				export (csv|json). Prompts for a path when
@@ -599,7 +750,7 @@ The unified :Dblite forms and these individual commands are equivalent;
 :DbliteRun, :DbliteRunAt, and :DbliteToggleOut are kept as aliases.
 
 ==============================================================================
-15. KEYMAPS						*dblite-keymaps*
+16. KEYMAPS						*dblite-keymaps*
 
 dblite sets keymaps in several scopes. All are configurable (see
 |dblite-config|); set any mapping to "" or false to disable it.
@@ -618,6 +769,7 @@ Use global maps for cross-cutting actions you want available everywhere:
   `keymaps.global.toggle_binds`    toggle dblite.binds.json
   `keymaps.global.inspect`         inspect the current page untruncated
   `keymaps.global.fullscreen`      toggle dbout fullscreen
+  `keymaps.global.cycle_split`     flip dbout between right and below
   `keymaps.global.connections`     open the connections JSON file
 
 Editor maps are buffer-local (set only in `filetypes` buffers), so they never
@@ -634,6 +786,7 @@ dbout buffer ~  (active only inside the result buffer)
 	`gi`		inspect page		`keymaps.dbout.inspect`
 	`<C-c>`		cancel query		`keymaps.dbout.cancel`
 	(unset)	toggle dbout		`keymaps.dbout.toggle_dbout`
+	(unset)	flip split placement	`keymaps.dbout.cycle_split`
 
 editor (SQL buffers) ~  (buffer-local; set on the `filetypes` buffers)
 
@@ -644,6 +797,7 @@ editor (SQL buffers) ~  (buffer-local; set on the `filetypes` buffers)
 The following editor actions are unbound by default (lhs = ""); set an lhs to
 enable them (buffer-local, SQL buffers only):
 
+	`keymaps.editor.cycle_split`	flip dbout between right and below
 	`keymaps.editor.run`		run the whole buffer
 	`keymaps.editor.run_at`		run the statement under the cursor
 	`keymaps.editor.run_script`	run the buffer as a SQL*Plus script
@@ -683,19 +837,19 @@ dblite binds no query-running keys globally by default; enable them via
 `on_attach`, or map directly against the |dblite-api|.
 
 ==============================================================================
-16. CONFIGURATION					*dblite-config*
+17. CONFIGURATION					*dblite-config*
 							*dblite.setup()*
 Call `require('dblite').setup(opts)`. Options are deep-merged over the
 defaults, so you only need to specify what you change. Defaults: >lua
 	require('dblite').setup({
-	  split_dir      = 'horizontal',  -- 'vertical'|'horizontal'|'tab'
+	  split_dir      = 'horizontal',  -- right|left|below|above|tab
 	  split_size     = { width = 80, height = 20 },
 	  page_size      = 100,           -- rows per page in dbout
 	  max_rows       = 10000,         -- hard cap on rows returned
 	  max_col_width  = 50,            -- truncate cells wider than this; 0=off
 	  max_history    = 20,            -- past results to keep; 0 = unlimited
 	  show_column_types = false,      -- show [TYPE] in headers by default
-	  filetypes      = { 'sql', 'plsql', 'mysql', 'sqlite' }, -- buffers to
+	  filetypes      = { 'sql', 'plsql', 'mysql', 'sqlite', 'redis' }, -- buffers to
 	                                  --   attach editor keymaps + on_attach to
 	  on_attach      = nil,           -- function(bufnr): custom per-SQL-buffer
 	                                  --   setup (buffer-local keybinds, etc.)
@@ -805,7 +959,7 @@ defaults, so you only need to specify what you change. Defaults: >lua
 	})
 <
 ==============================================================================
-17. LUA API						*dblite-api*
+18. LUA API						*dblite-api*
 
 All functionality is available programmatically: >lua
 	local db = require('dblite')
@@ -826,6 +980,9 @@ All functionality is available programmatically: >lua
 	                           --   opts = { query =, conn = }
 	db.toggle_dbout()          -- show/hide the result window
 	db.toggle_fullscreen()     -- toggle dbout fullscreen tab
+	db.set_split_dir(dir)      -- move dbout: 'right'|'left'|'below'|
+	                           --   'above'|'tab'; see |dblite-dbout-split|
+	db.cycle_split()           -- flip dbout between right and below
 	db.inspect(format)         -- 'json' | 'table' | 'csv'
 	db.export(format, path)    -- write the full result set to a file
 	db.load()                  -- load a CSV via a LOAD DATA control block
@@ -860,7 +1017,7 @@ everywhere: >lua
 	vim.keymap.set('n', '<leader>do', db.toggle_dbout,      { desc = 'dblite: dbout' })
 <
 ==============================================================================
-18. INLINE QUERIES					*dblite-inline* *db.inline()*
+19. INLINE QUERIES					*dblite-inline* *db.inline()*
 
 `db.inline()` runs a statement against a named saved connection and hands the
 result straight back to Lua. It is the only run path that touches no UI: no
@@ -953,7 +1110,7 @@ the second return value when sync. `res` is nil whenever `err` is set. >lua
 	end)
 <
 ==============================================================================
-19. HIGHLIGHTS						*dblite-highlights*
+20. HIGHLIGHTS						*dblite-highlights*
 
 dblite defines these highlight groups (all `default`, so your colorscheme or
 an explicit `nvim_set_hl` override wins):
