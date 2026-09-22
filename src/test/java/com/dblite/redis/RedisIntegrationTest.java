@@ -60,8 +60,15 @@ class RedisIntegrationTest {
                 src.execute("SADD " + PREFIX + "set x y", 0);
                 src.execute("ZADD " + PREFIX + "zset 991 alice 847 bob", 0);
 
+                // Asserting the set of types beats asserting a count: it is the
+                // thing under test, and EXPIRE creates no key of its own — which
+                // an off-by-one count happily hid.
                 List<List<String>> keys = drain(src.execute("KEYS " + PREFIX + "*", 0).rows);
-                assertEquals(6, keys.size());
+                java.util.Set<String> types = new java.util.TreeSet<>();
+                for (List<String> row : keys) types.add(row.get(1));
+                assertEquals(java.util.Set.of("string", "hash", "list", "set", "zset"), types,
+                    "every seeded type should round-trip");
+                assertEquals(5, keys.size(), "five keys were seeded: " + keys);
 
                 List<String> str = keys.stream().filter(r -> r.get(0).endsWith(":str"))
                     .findFirst().orElseThrow();
