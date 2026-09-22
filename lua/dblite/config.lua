@@ -45,6 +45,14 @@ local M = {
   panel = {
     width = 30,  -- columns for the side panel
   },
+  redis = {
+    -- Redis has no catalog and no language server, so completion is built from
+    -- the live instance: command names, key namespaces, and a hash's fields.
+    completion = {
+      enabled  = true,
+      max_keys = 5000,  -- cap on keys pulled in for completion; 0 = no cap
+    },
+  },
   jobs = {  -- the activity panel: bulk exports (`:Dblite run bulk`) and watches
     panel = { width = 44 },  -- activity panel: right-side vertical split, this many columns wide
     cleanup_delay  = 300,    -- seconds a finished job lingers in the LIVE list before removal (it stays visible via history); 0 = keep until deleted

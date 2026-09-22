@@ -250,6 +250,23 @@ class RedisSourceTest {
         }
     }
 
+    /** The editor completes against this list, so its shape has to be stable. */
+    @Test
+    void commandReplyBecomesNameArityFlagsColumns() throws Exception {
+        try (FakeRedis server = new FakeRedis()) {
+            try (RedisSource src = new RedisSource(server.url(), null, null)) {
+                Rows rows = src.execute("COMMAND", 0).rows;
+                assertArrayEquals(new String[] { "name", "arity", "flags" }, rows.columns());
+                List<Map<String, String>> drained = drain(rows);
+                assertEquals(2, drained.size());
+                assertEquals("get", drained.get(0).get("name"));
+                assertEquals("2", drained.get(0).get("arity"));
+                assertEquals("readonly fast", drained.get(0).get("flags"));
+                assertEquals("hgetall", drained.get(1).get("name"));
+            }
+        }
+    }
+
     // --- JSON ---------------------------------------------------------------
 
     @Test

@@ -265,6 +265,13 @@ final class FakeRedis implements AutoCloseable {
                 }
                 return false;
             }
+            case "COMMAND": {
+                // Two nested entries: [name, arity, [flags...]]
+                out.write("*2\r\n".getBytes(StandardCharsets.UTF_8));
+                commandEntry(out, "get", 2, List.of("readonly", "fast"));
+                commandEntry(out, "hgetall", 2, List.of("readonly"));
+                return false;
+            }
             case "SCAN":   scan(args, out); return false;
             case "KEYS":   error(out, "ERR fake server does not serve KEYS directly"); return false;
             default:
@@ -393,6 +400,14 @@ final class FakeRedis implements AutoCloseable {
         out.write(("$" + b.length + "\r\n").getBytes(StandardCharsets.UTF_8));
         out.write(b);
         out.write("\r\n".getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static void commandEntry(OutputStream out, String name, long arity, List<String> flags)
+            throws IOException {
+        out.write("*3\r\n".getBytes(StandardCharsets.UTF_8));
+        writeBulk(out, name);
+        integer(out, arity);
+        array(out, flags);
     }
 
     private static void array(OutputStream out, List<String> items) throws IOException {

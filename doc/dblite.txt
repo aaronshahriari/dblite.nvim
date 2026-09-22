@@ -471,6 +471,36 @@ Arguments are quoted as in redis-cli: double quotes honour escapes (`\n`,
 `\t`, `\xHH`), single quotes are literal. A reply of `+OK` is reported as an
 executed statement; any other reply is shown in the grid.
 
+COMPLETION						*dblite-redis-completion*
+
+There is no Redis language server, so completion is built from the live
+instance and served through blink.cmp (|dblite-completion|):
+
+	start of a line	  the server's own command list, with arity and
+			  flags — modules such as JSON.GET included
+	argument position key namespaces one level at a time:
+			  `user:` then `user:sessions:` then the keys
+	after a hash key  that key's field names
+
+Offering one namespace level at a time is what keeps this usable on a real
+keyspace: instead of every key at once you get the handful of prefixes at the
+current depth. The keyspace and command list are cached per connection and
+refreshed when the connection is switched or edited.
+>
+	redis = { completion = { enabled = true, max_keys = 5000 } }
+<
+`max_keys` caps how many keys are pulled in (0 = no cap). Gathering them is a
+SCAN, so it costs one keyspace walk the first time completion is used on a
+connection; lower the cap or set `enabled = false` on a very large instance.
+
+FILETYPE						*dblite-redis-filetype*
+
+Neovim has no `redis` filetype of its own, so |dblite-config| `setup()` claims
+`*.redis` for one (unless something already detects it). Redis commands also
+run fine in a `.sql` buffer — dblite routes on the active connection's type,
+not the buffer's filetype — but SQL highlighting and SQL completion will look
+wrong there, so a `.redis` file is the better home.
+
 LIMITATIONS						*dblite-redis-limits*
 
 `redis+cluster://` and `redis+sentinel://` are not supported yet.
@@ -481,7 +511,8 @@ indistinguishable from a `:jobs` bind reference.
 
 `:Dblite load` (|dblite-load|) generates INSERT statements and is SQL-only.
 
-SQL completion is likewise suppressed, since there is no catalog to read.
+SQL completion is replaced by the Redis-specific completion described above,
+since there is no catalog to read.
 
 ==============================================================================
 9. RESULT BUFFER (dbout)				*dblite-dbout*
@@ -862,6 +893,8 @@ defaults, so you only need to specify what you change. Defaults: >lua
 	  max_col_width  = 50,            -- truncate cells wider than this; 0=off
 	  max_history    = 20,            -- past results to keep; 0 = unlimited
 	  show_column_types = false,      -- show [TYPE] in headers by default
+	  redis          = { completion = { enabled = true,
+	                                    max_keys = 5000 } },
 	  filetypes      = { 'sql', 'plsql', 'mysql', 'sqlite', 'redis' }, -- buffers to
 	                                  --   attach editor keymaps + on_attach to
 	  on_attach      = nil,           -- function(bufnr): custom per-SQL-buffer

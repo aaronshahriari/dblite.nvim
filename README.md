@@ -51,7 +51,7 @@ The database work runs in a native binary (GraalVM), so there's **no JVM at runt
 - **Load** a CSV into a table with a SQL\*Loader-style `LOAD DATA` block — previewed as `INSERT`s before you commit.
 - **Inspect** any page untruncated as JSON, table, or CSV.
 - **Inline queries from Lua** — `db.inline{ conn = 'prod', sql = ... }` runs headlessly and hands you the rows, so you can embed a query in a keymap, timer or autocommand without touching the UI.
-- **SQL autocomplete** via [blink.cmp](https://github.com/Saghen/blink.cmp) — tables, columns, and bind names from the live schema.
+- **SQL autocomplete** via [blink.cmp](https://github.com/Saghen/blink.cmp) — tables, columns, and bind names from the live schema. On Redis: command names, key namespaces one level at a time, and hash fields.
 - **Connection UI** — a built-in side panel, or an opt-in [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim) picker.
 
 ## Requirements
@@ -200,7 +200,7 @@ Trailing semicolons are stripped automatically. The legacy `:DbliteRun`, `:Dblit
 
 Pick a Redis connection and the buffer becomes a Redis command buffer — same keys, same result grid, same everything above it.
 
-**One command per line.** Keep a scratch buffer of the commands you use, put the cursor on one, and run it:
+**One command per line.** Keep a scratch buffer of the commands you use, put the cursor on one, and run it. `*.redis` files get dblite's editor keymaps automatically; so does any `.sql` buffer, since routing is by **connection**, not filetype:
 
 ```redis
 KEYS *
@@ -277,6 +277,22 @@ DEL session:expired:a83f
 ```
 
 Because the protocol is length-prefixed, values containing newlines, spaces, commas or quotes round-trip exactly. Quote them as you would in `redis-cli` — `"a\nb"` for an escape, `'{"a": 1}'` for a JSON literal.
+
+**Completion.** There is no Redis language server, so dblite builds completion from the live instance via [blink.cmp](https://github.com/Saghen/blink.cmp):
+
+| where the cursor is | what you get |
+|---|---|
+| start of a line | the server's own command list, with arity and flags (so modules like `JSON.GET` show up too) |
+| argument position | key namespaces **one level at a time** — `user:` → `user:sessions:` → the keys |
+| after a hash key | that key's field names (`HGET user:1042 <tab>`) |
+
+Progressive namespaces are what make this usable on a real keyspace: you never get a 40,000-item list, just the handful of prefixes at your current depth. Cached per connection, refreshed when you switch or edit the connection.
+
+```lua
+redis = { completion = { enabled = true, max_keys = 5000 } }
+```
+
+`max_keys` caps how many keys are pulled in for completion (`0` = no cap). Note it's a `SCAN`, so it costs a keyspace walk on first use — lower it on a huge instance, or set `enabled = false`.
 
 **Not supported yet:** `redis+cluster://` and `redis+sentinel://`. Bind parameters are a SQL feature and are switched off for Redis — otherwise every colon-namespaced key (`queue:jobs`) would read as a missing `:jobs` parameter. `:Dblite load` is SQL-only.
 
@@ -699,6 +715,7 @@ require('dblite').setup({
   max_history    = 20,            -- past query results to keep; 0 = unlimited
   show_column_types = false,      -- show [TYPE] next to column headers by default
   filetypes      = { 'sql', 'plsql', 'mysql', 'sqlite', 'redis' }, -- buffers dblite attaches to (editor keymaps + on_attach)
+  redis          = { completion = { enabled = true, max_keys = 5000 } }, -- Redis command/key/field completion
   on_attach      = nil,           -- function(bufnr) run per SQL buffer for custom buffer-local keybinds
   filetype       = '',            -- filetype for the result buffer ('' = no highlighting)
   flash_timeout  = 2000,          -- ms to hold the query highlight; 0 = hold until results

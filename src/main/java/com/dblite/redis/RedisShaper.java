@@ -59,6 +59,14 @@ final class RedisShaper {
             if (text != null) return info(text);
         }
 
+        // `COMMAND` / `COMMAND INFO` return one nested array per command. Naming
+        // the first three fields makes the reply readable here and gives the
+        // editor a command list to complete against.
+        if (cmd.equals("COMMAND") && (args.size() == 1 || sub.equals("INFO"))
+                && reply.isAggregate()) {
+            return commandTable(reply.items);
+        }
+
         if (reply.kind == RespValue.Kind.MAP) {
             return pairs(reply.items, "field", "value");
         }
@@ -137,6 +145,38 @@ final class RedisShaper {
             return ListRows.single("result", Json.isJsonDocument(text) ? T_JSON : T_STRING, Cell.of(text));
         }
         return ListRows.single("result", scalarType(reply), cellOf(reply));
+    }
+
+    /**
+     * name/arity/flags from a COMMAND reply. Entries that are not the expected
+     * nested array are skipped rather than shifting every following column.
+     */
+    private static Rows commandTable(List<RespValue> entries) {
+        List<Cell[]> rows = new ArrayList<>(entries.size());
+        for (RespValue entry : entries) {
+            if (entry == null || !entry.isAggregate() || entry.items.size() < 3) continue;
+            RespValue name  = entry.items.get(0);
+            RespValue arity = entry.items.get(1);
+            RespValue flags = entry.items.get(2);
+
+            StringBuilder flagText = new StringBuilder();
+            if (flags != null && flags.isAggregate()) {
+                for (RespValue f : flags.items) {
+                    if (flagText.length() > 0) flagText.append(' ');
+                    flagText.append(f.asTextOrEmpty());
+                }
+            }
+            rows.add(new Cell[] {
+                Cell.of(name.asTextOrEmpty()),
+                arity != null && arity.kind == RespValue.Kind.INT
+                    ? Cell.of(arity.integer) : Cell.nil(),
+                Cell.of(flagText.toString()),
+            });
+        }
+        return new ListRows(
+            new String[] { "name", "arity", "flags" },
+            new String[] { T_STRING, T_INT, T_STRING },
+            rows);
     }
 
     /** `INFO` returns an ini-style blob; section/field/value makes it filterable. */

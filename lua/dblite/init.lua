@@ -175,6 +175,15 @@ end
 function M.setup(opts)
   if opts then merge_into(config, opts) end
   apply_global_keymaps()
+
+  -- Neovim has no `redis` filetype of its own, so `*.redis` would attach
+  -- nothing. Claim it here (without overriding a detection the user set up
+  -- themselves) so a Redis scratch file gets dblite's editor keymaps.
+  if vim.tbl_contains(config.filetypes or {}, "redis")
+      and vim.filetype.match({ filename = "dblite-probe.redis" }) == nil then
+    pcall(vim.filetype.add, { extension = { redis = "redis" } })
+  end
+
   -- SQL-only keymaps + on_attach: applied per-buffer via a FileType autocmd, so
   -- they are always buffer-local and never fire in unrelated buffers/windows.
   local fts = config.filetypes or { "sql", "plsql", "mysql", "sqlite" }
@@ -1390,6 +1399,22 @@ local function complete_name(arg_lead)
   return out
 end
 
+-- Warms the completion cache a source actually has: a SQL catalog, or for
+-- Redis the keyspace and command list.
+local function prefetch_completion(conn)
+  if not conn then return end
+  if conn.type == "redis" then
+    require("dblite.keyspace").prefetch(conn)
+  else
+    require("dblite.schema").prefetch(conn)
+  end
+end
+
+local function invalidate_completion(conn_id)
+  require("dblite.schema").invalidate(conn_id)
+  require("dblite.keyspace").invalidate(conn_id)
+end
+
 local function edit_conn_by_name(name)
   local conn = connections.get_by_name(name)
   if not conn then
@@ -1412,10 +1437,10 @@ local function edit_conn_by_name(name)
       vim.notify("\ndblite: " .. tostring(result), vim.log.levels.ERROR)
       return
     end
-    require("dblite.schema").invalidate(conn.id)
+    invalidate_completion(conn.id)
     if state.active_conn and state.active_conn.id == conn.id then
       state.active_conn = result
-      require("dblite.schema").prefetch(result)
+      prefetch_completion(result)
     end
     vim.notify("\ndblite: updated '" .. updates.name .. "'", vim.log.levels.INFO)
     panel.refresh()
@@ -1446,8 +1471,11 @@ local function edit_conn_by_name(name)
       vim.notify("\ndblite: " .. tostring(result), vim.log.levels.ERROR)
       return
     end
+    -- Host or database index may have changed, so the cached keyspace is stale.
+    invalidate_completion(conn.id)
     if state.active_conn and state.active_conn.id == conn.id then
       state.active_conn = result
+      prefetch_completion(result)
     end
     vim.notify("\ndblite: updated '" .. updates.name .. "'", vim.log.levels.INFO)
     panel.refresh()
@@ -1479,18 +1507,18 @@ local function edit_conn_by_name(name)
     return
   end
   if state.active_conn and state.active_conn.id == conn.id then
-    require("dblite.schema").invalidate(conn.id)
+    invalidate_completion(conn.id)
     state.active_conn = connections.get(conn.id)
-    if state.active_conn then require("dblite.schema").prefetch(state.active_conn) end
+    prefetch_completion(state.active_conn)
   end
   vim.notify("\ndblite: updated '" .. (updates.name or conn.name) .. "'", vim.log.levels.INFO)
   panel.refresh()
 end
 
--- Sets the active connection, warms the schema cache, and refreshes the panel.
+-- Sets the active connection, warms the completion cache, and refreshes the panel.
 local function activate_conn(conn)
   state.active_conn = conn
-  require("dblite.schema").prefetch(conn)
+  prefetch_completion(conn)
   vim.notify("dblite: using '" .. conn.name .. "'", vim.log.levels.INFO)
   panel.refresh()
 end
@@ -2278,8 +2306,8 @@ function M.edit_connections_file()
         local updated = connections.get(state.active_conn.id)
         if updated then
           state.active_conn = updated
-          require("dblite.schema").invalidate(updated.id)
-          require("dblite.schema").prefetch(updated)
+          invalidate_completion(updated.id)
+          prefetch_completion(updated)
         end
       end
     end,

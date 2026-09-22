@@ -132,6 +132,152 @@ local function query_context(bufnr, sch, unqualified_owner)
   return qcols, fqn_map
 end
 
+-- ── Redis completion ───────────────────────────────────────────────────────
+-- Redis has no catalog and no language server, so the three things worth
+-- completing come from the live instance: the server's own command list at the
+-- start of a line, key names in argument position, and a hash's fields once the
+-- key is known. See dblite.keyspace.
+
+-- Commands whose second argument is a hash key, so the argument after it is a
+-- field name rather than another key.
+local HASH_FIELD_CMDS = {
+  HGET = true, HSET = true, HSETNX = true, HDEL = true, HMGET = true,
+  HMSET = true, HEXISTS = true, HINCRBY = true, HINCRBYFLOAT = true,
+  HSTRLEN = true,
+}
+
+-- Splits the line into finished tokens plus the partial one under the cursor.
+-- Quoting is ignored: completion is about identifiers, and a key name inside
+-- quotes is rare enough not to warrant a second tokenizer here.
+local function redis_context(line)
+  local tokens = {}
+  for tok in line:gmatch("%S+") do table.insert(tokens, tok) end
+  -- A trailing space means the cursor has started a new, still-empty token.
+  local partial = ""
+  if not line:match("%s$") and #tokens > 0 then
+    partial = table.remove(tokens)
+  end
+  return tokens, partial
+end
+
+-- The replacement range for the partial token, so a key containing ':' is
+-- swapped whole instead of being appended to the namespace already typed.
+local function redis_edit(ctx, partial)
+  local row = ctx.cursor[1] - 1
+  local col = ctx.cursor[2]
+  return {
+    range = {
+      start   = { line = row, character = math.max(0, col - #partial) },
+      ["end"] = { line = row, character = col },
+    },
+  }
+end
+
+local function redis_item(label, kind, detail, ctx, partial)
+  local edit = redis_edit(ctx, partial)
+  return {
+    label      = label,
+    kind       = kind,
+    detail     = detail,
+    filterText = label,
+    sortText   = label,
+    textEdit   = { newText = label, range = edit.range },
+  }
+end
+
+local function redis_completions(ctx, conn, keyspace, callback)
+  local line = ctx.line:sub(1, ctx.cursor[2])
+  local tokens, partial = redis_context(line)
+
+  local data = keyspace.peek(conn)
+  if not data then
+    keyspace.prefetch(conn)
+    -- Incomplete so blink re-queries once the keyspace lands, rather than
+    -- leaving a dead window with no suggestions.
+    callback({ is_incomplete_forward = true, is_incomplete_backward = false, items = {} })
+    return
+  end
+
+  local items = {}
+  local function matches(s)
+    return partial == "" or s:sub(1, #partial):lower() == partial:lower()
+  end
+
+  if #tokens == 0 then
+    -- Start of the line: the command itself.
+    for _, c in ipairs(data.commands) do
+      if matches(c.name) then
+        local detail = c.arity and ("arity " .. tostring(c.arity)) or nil
+        if c.flags ~= "" then
+          detail = (detail and (detail .. "  ") or "") .. c.flags
+        end
+        table.insert(items, redis_item(c.name, KIND.Keyword, detail, ctx, partial))
+      end
+    end
+    callback({ is_incomplete_forward = false, is_incomplete_backward = false, items = items })
+    return
+  end
+
+  -- Field position: a hash command whose key is already typed.
+  local cmd = tokens[1]:upper()
+  if HASH_FIELD_CMDS[cmd] and #tokens >= 2 then
+    local key = tokens[2]
+    if (data.types[key] or "") == "hash" then
+      local fields = keyspace.peek_fields(conn, key)
+      if not fields then
+        callback({ is_incomplete_forward = true, is_incomplete_backward = false, items = {} })
+        return
+      end
+      for _, f in ipairs(fields) do
+        if matches(f) then
+          table.insert(items, redis_item(f, KIND.Field, key, ctx, partial))
+        end
+      end
+      callback({ is_incomplete_forward = false, is_incomplete_backward = false, items = items })
+      return
+    end
+  end
+
+  -- Argument position: key names.
+  --
+  -- Namespaces are offered one level at a time — the next separator after what
+  -- has been typed — so a keyspace of any depth collapses to a short list at
+  -- each step: "" offers `user:`, then `user:` offers `user:sessions:`. Keys
+  -- that match outright are offered alongside, sorted after the namespaces.
+  local range   = redis_edit(ctx, partial).range
+  local seen_ns = {}
+  local matched = {}
+
+  for _, key in ipairs(data.keys) do
+    if matches(key) then
+      table.insert(matched, key)
+      local sep = key:find(":", #partial + 1, true)
+      if sep then
+        local ns = key:sub(1, sep)          -- includes the trailing separator
+        if not seen_ns[ns] then
+          seen_ns[ns] = true
+          table.insert(items, {
+            label      = ns,
+            kind       = KIND.Module,
+            detail     = "namespace",
+            filterText = ns,
+            sortText   = "0" .. ns,
+            textEdit   = { newText = ns, range = range },
+          })
+        end
+      end
+    end
+  end
+
+  for _, key in ipairs(matched) do
+    local item = redis_item(key, KIND.Variable, data.types[key], ctx, partial)
+    item.sortText = "1" .. key
+    table.insert(items, item)
+  end
+
+  callback({ is_incomplete_forward = false, is_incomplete_backward = false, items = items })
+end
+
 -- ─────────────────────────────────────────────────────────────────────────────
 
 local source = {}
@@ -153,9 +299,15 @@ function source:get_completions(ctx, callback)
   local bufname  = vim.api.nvim_buf_get_name(ctx.bufnr)
   local is_binds = bufname:match("dblite%.binds%.json$") ~= nil
 
-  -- Redis has no SQL catalog, so every suggestion below would be noise.
-  if conn and conn.type == "redis" then
-    callback({ is_incomplete_forward = false, is_incomplete_backward = false, items = {} })
+  -- Redis is a different grammar entirely: commands and key names, not tables
+  -- and columns. Nothing below this point applies.
+  if conn and conn.type == "redis" and not is_binds then
+    local keyspace = require("dblite.keyspace")
+    if not keyspace.enabled() then
+      callback({ is_incomplete_forward = false, is_incomplete_backward = false, items = {} })
+      return
+    end
+    redis_completions(ctx, conn, keyspace, callback)
     return
   end
 
