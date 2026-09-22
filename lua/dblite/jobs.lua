@@ -1,10 +1,15 @@
--- Background (async) bulk-export jobs + their side panel.
+-- The dblite activity panel: background export jobs, plus the watches owned by
+-- `dblite.watch`.
 --
 -- A "job" is a long-running query whose result set is streamed straight to a
 -- file by the native binary (`--to-file`). Jobs run detached from the main
 -- dblite result buffer so the user can keep running normal queries while a big
--- dump churns in the background. This module owns the job registry and the
--- panel that visualises it (status, file name, duration, and row count).
+-- dump churns in the background. This module owns the job registry, the shared
+-- job history file, and the panel that renders both jobs and watches.
+--
+-- The panel shows live work first (watches, then running exports) and folds
+-- finished exports behind a single collapsible line, because the live region is
+-- what you open the panel to check.
 local config = require("dblite.config")
 
 local M = {}
@@ -19,8 +24,18 @@ vim.api.nvim_set_hl(0, "DbliteJobsDone",      { link = "String",          defaul
 vim.api.nvim_set_hl(0, "DbliteJobsError",     { link = "DiagnosticError", default = true })
 vim.api.nvim_set_hl(0, "DbliteJobsCancelled", { link = "WarningMsg",      default = true })
 vim.api.nvim_set_hl(0, "DbliteJobsMeta",      { link = "Comment",         default = true })
+vim.api.nvim_set_hl(0, "DbliteJobsWatch",     { link = "Constant",        default = true })
 
-local ICON = { running = "…", done = "✓", error = "✗", cancelled = "✗" }
+local ICON = {
+  running   = "⋯",  -- export in flight
+  done      = "✓",
+  error     = "✗",
+  cancelled = "✗",
+  watch     = "◐",  -- watch still polling
+  matched   = "✓",  -- watch found what it was waiting for
+  expired   = "○",  -- watch hit its tick cap without matching
+  stopped   = "⊘",  -- watch stopped by hand
+}
 
 local jobs = {}   -- live job records for THIS instance (running + pending cleanup)
 
@@ -34,17 +49,20 @@ local function new_id()
 end
 
 local state = {
-  bufnr      = nil,
-  winnr      = nil,
-  line_map   = {},   -- panel line (1-based) → job id
-  prev_winnr = nil,
+  bufnr        = nil,
+  winnr        = nil,
+  line_map     = {},    -- panel line (1-based) → { kind = "job"|"watch"|"history_toggle", id }
+  prev_winnr   = nil,
+  history_open = false, -- finished exports start folded
+  ticker       = nil,   -- 1s redraw while the panel is open and work is live
 }
 
 -- --- Persistent history ---------------------------------------------------
 -- Terminal jobs (done/error/cancelled) are appended to a shared JSON file so
 -- history survives restarts and is visible across all Neovim instances. Only
 -- terminal jobs are persisted — running jobs live in the owning instance's
--- memory, so a killed instance never leaves a stuck "running" ghost.
+-- memory, so a killed instance never leaves a stuck "running" ghost. Watches are
+-- never written here either; they are session-local by design.
 
 local history_cache = {}  -- past terminal jobs, newest-first (in-memory mirror)
 
@@ -203,10 +221,23 @@ function M.has_running()
 end
 
 -- --- Rendering ------------------------------------------------------------
+--
+-- The panel is deliberately flat: one title, then a live region (watches and
+-- running exports, the things you actually came to look at), then finished work
+-- folded behind a single collapsible line. No section headers, no rules, no
+-- column alignment beyond right-aligning the meta column.
 
 local function trunc(s, n)
   if vim.fn.strchars(s) <= n then return s end
   return vim.fn.strcharpart(s, 0, n - 1) .. "…"
+end
+
+-- 5412 → "5,412". Long-running exports report big numbers and unseparated
+-- digits are hard to read at a glance.
+local function commas(n)
+  local s = tostring(n)
+  local out = s:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+  return (out:gsub("^,", ""))
 end
 
 local function format_duration(j)
@@ -216,7 +247,7 @@ local function format_duration(j)
 end
 
 local function format_rows(rows)
-  return (rows ~= nil and tostring(rows) or "?") .. " rows"
+  return (rows ~= nil and commas(rows) or "?") .. " rows"
 end
 
 local function file_name(j)
@@ -248,9 +279,87 @@ local function newer_history_first(a, b)
   return id_counter(a.id) > id_counter(b.id)
 end
 
--- Running jobs and terminal history are rendered separately. Terminal live jobs
--- are included in history until cleanup removes the live copy, so recently
--- finished jobs stay in the right chronological position.
+local function watch_mod()
+  local ok, w = pcall(require, "dblite.watch")
+  return ok and w or nil
+end
+
+-- Watches render as `tick/cap · rows · next tick`, so a glance answers "how far
+-- along is it and when does it look again".
+local function watch_line_parts(w)
+  local icon, hl
+  if w.status == "running" then
+    icon, hl = ICON.watch, "DbliteJobsWatch"
+  elseif w.status == "matched" then
+    icon, hl = ICON.matched, "DbliteJobsDone"
+  elseif w.status == "error" then
+    icon, hl = ICON.error, "DbliteJobsError"
+  elseif w.status == "stopped" then
+    icon, hl = ICON.stopped, "DbliteJobsCancelled"
+  else -- done: ran to the cap without matching
+    icon, hl = ICON.expired, "DbliteJobsCancelled"
+  end
+
+  local cap  = (w.max and w.max > 0) and tostring(w.max) or "∞"
+  local meta = w.tick .. "/" .. cap .. " · " .. format_rows(w.rows)
+
+  if w.status == "running" then
+    local wm = watch_mod()
+    local nxt = wm and wm.next_in(w) or nil
+    if w.running_since then
+      meta = meta .. " · run"
+    elseif nxt then
+      meta = meta .. " · " .. wm.fmt_duration(nxt)
+    end
+  elseif w.status == "matched" then
+    meta = meta .. " · matched"
+  elseif w.status == "error" then
+    meta = meta .. " · failed"
+  elseif w.status == "done" then
+    meta = meta .. " · no match"
+  else
+    meta = meta .. " · stopped"
+  end
+
+  return icon, hl, meta
+end
+
+local function job_line_parts(j)
+  local icon, hl, tail
+  if j.status == "running" then
+    icon, hl, tail = ICON.running, "DbliteJobsRunning", format_rows(j.rows)
+  elseif j.status == "done" then
+    icon, hl, tail = ICON.done, "DbliteJobsDone", format_rows(j.rows)
+  elseif j.status == "error" then
+    -- A failed export wrote no rows, so "? rows" is noise; say what happened.
+    icon, hl, tail = ICON.error, "DbliteJobsError", "failed"
+  else
+    icon, hl, tail = ICON.cancelled, "DbliteJobsCancelled", "cancelled"
+  end
+  return icon, hl, format_duration(j) .. " · " .. tail
+end
+
+-- One entry line: `  <icon> <label>        <meta>`, meta right-aligned.
+local function append_entry(ctx, icon, status_hl, label, meta, ref)
+  local prefix = "  "
+  local mid    = " "
+  local label_width = math.max(8, ctx.width - 7 - vim.fn.strdisplaywidth(meta))
+  local labelf = trunc(label, label_width)
+  local pad    = string.rep(" ", math.max(1, label_width + 1 - vim.fn.strdisplaywidth(labelf)))
+  local line   = prefix .. icon .. mid .. labelf .. pad .. meta
+
+  table.insert(ctx.lines, line)
+  local row = #ctx.lines - 1
+  ctx.line_map[#ctx.lines] = ref
+
+  local icon_col = #prefix
+  local meta_col = #prefix + #icon + #mid + #labelf + #pad
+  table.insert(ctx.hls, { row = row, col = icon_col, ecol = icon_col + #icon, group = status_hl })
+  table.insert(ctx.hls, { row = row, col = meta_col, ecol = meta_col + #meta, group = "DbliteJobsMeta" })
+end
+
+-- Live jobs and terminal history are split: terminal live jobs stay in history
+-- until cleanup drops the live copy, so recently finished work keeps its place.
 local function display_groups()
   local running, history, seen_history = {}, {}, {}
 
@@ -279,78 +388,49 @@ local function display_groups()
   return running, history
 end
 
-local function append_section(lines, hls, title)
-  if #lines > 2 then table.insert(lines, "") end
-  table.insert(lines, "  " .. title)
-  table.insert(hls, { row = #lines - 1, col = 2, ecol = #lines[#lines], group = "DbliteJobsSection" })
-end
-
-local function append_job(lines, line_map, hls, width, j)
-  local icon, status_hl, meta
-  if j.status == "running" then
-    icon      = ICON.running
-    status_hl = "DbliteJobsRunning"
-    meta      = format_duration(j) .. " · " .. format_rows(j.rows)
-  else
-    if j.status == "done" then
-      icon      = ICON.done
-      status_hl = "DbliteJobsDone"
-    elseif j.status == "error" then
-      icon      = ICON.error
-      status_hl = "DbliteJobsError"
-    else -- cancelled
-      icon      = ICON.cancelled
-      status_hl = "DbliteJobsCancelled"
-    end
-    meta = format_duration(j) .. " · " .. format_rows(j.rows)
-  end
-
-  local prefix  = "  "
-  local mid     = "  "
-  local label_width = math.max(8, width - 8 - vim.fn.strdisplaywidth(meta))
-  local labelf  = trunc(file_name(j), label_width)
-  local pad     = string.rep(" ", math.max(1, label_width + 1 - vim.fn.strdisplaywidth(labelf)))
-  local line    = prefix .. icon .. mid .. labelf .. pad .. meta
-
-  table.insert(lines, line)
-  local row = #lines - 1
-  line_map[#lines] = j.id
-
-  local icon_col = #prefix
-  local meta_col = #prefix + #icon + #mid + #labelf + #pad
-  table.insert(hls, { row = row, col = icon_col, ecol = icon_col + #icon, group = status_hl })
-  table.insert(hls, { row = row, col = meta_col, ecol = meta_col + #meta, group = "DbliteJobsMeta" })
-end
-
 local function build_lines()
-  local width     = (config.jobs and config.jobs.panel and config.jobs.panel.width) or 46
-  local sep_width = width - 2
+  local width = (config.jobs and config.jobs.panel and config.jobs.panel.width) or 44
+  local ctx   = { lines = { "  dblite", "" }, line_map = {}, hls = {}, width = width }
+  table.insert(ctx.hls, { row = 0, col = 2, ecol = #ctx.lines[1], group = "DbliteJobsTitle" })
 
-  local lines    = { "Background Jobs", string.rep("─", sep_width) }
-  local line_map = {}
-  local hls      = {
-    { row = 0, col = 0, ecol = #lines[1], group = "DbliteJobsTitle" },
-    { row = 1, col = 0, ecol = #lines[2], group = "DbliteJobsSep"   },
-  }
+  -- Watches first: they are the reason the panel is open most of the time.
+  local wm = watch_mod()
+  local watches = wm and wm.list() or {}
+  for _, w in ipairs(watches) do
+    local icon, hl, meta = watch_line_parts(w)
+    append_entry(ctx, icon, hl, w.label or "watch", meta, { kind = "watch", id = w.id })
+  end
 
   local running, history = display_groups()
-  if #running == 0 and #history == 0 then
-    table.insert(lines, "  (no background jobs)")
-    table.insert(hls, { row = 2, col = 0, ecol = #lines[3], group = "DbliteJobsMeta" })
-    return lines, line_map, hls
+  for _, j in ipairs(running) do
+    local icon, hl, meta = job_line_parts(j)
+    append_entry(ctx, icon, hl, file_name(j), meta, { kind = "job", id = j.id })
   end
 
-  if #running > 0 then
-    append_section(lines, hls, "Running")
-    for _, j in ipairs(running) do append_job(lines, line_map, hls, width, j) end
+  if #watches == 0 and #running == 0 then
+    table.insert(ctx.lines, "  nothing running")
+    table.insert(ctx.hls, { row = #ctx.lines - 1, col = 0, ecol = #ctx.lines[#ctx.lines],
+      group = "DbliteJobsMeta" })
   end
 
+  -- Finished work folds behind one line; <Tab> on it expands.
   if #history > 0 then
-    append_section(lines, hls, "History")
-    for _, j in ipairs(history) do append_job(lines, line_map, hls, width, j) end
+    table.insert(ctx.lines, "")
+    local arrow = state.history_open and "▾" or "▸"
+    local line  = "  " .. arrow .. " History (" .. #history .. ")"
+    table.insert(ctx.lines, line)
+    table.insert(ctx.hls, { row = #ctx.lines - 1, col = 0, ecol = #line, group = "DbliteJobsMeta" })
+    ctx.line_map[#ctx.lines] = { kind = "history_toggle" }
+
+    if state.history_open then
+      for _, j in ipairs(history) do
+        local icon, hl, meta = job_line_parts(j)
+        append_entry(ctx, icon, hl, file_name(j), meta, { kind = "job", id = j.id })
+      end
+    end
   end
 
-  return lines, line_map, hls
+  return ctx.lines, ctx.line_map, ctx.hls
 end
 
 local function render()
@@ -375,13 +455,51 @@ function M.refresh()
   if state.winnr and vim.api.nvim_win_is_valid(state.winnr) then render() end
 end
 
+-- A watch's "next tick in 24s" only stays truthful if something redraws it, so
+-- the panel ticks once a second while it is open and anything is still live.
+local function stop_ticker()
+  if state.ticker then
+    pcall(function() state.ticker:stop(); state.ticker:close() end)
+    state.ticker = nil
+  end
+end
+
+local function start_ticker()
+  stop_ticker()
+  local t = vim.uv.new_timer()
+  if not t then return end
+  state.ticker = t
+  t:start(1000, 1000, function()
+    vim.schedule(function()
+      if not (state.winnr and vim.api.nvim_win_is_valid(state.winnr)) then
+        stop_ticker()
+        return
+      end
+      local wm = watch_mod()
+      if M.has_running() or (wm and wm.has_running()) then render() end
+    end)
+  end)
+end
+
 -- --- Panel window ---------------------------------------------------------
 
-local function job_at_cursor()
+local function ref_at_cursor()
   if not state.winnr or not vim.api.nvim_win_is_valid(state.winnr) then return nil end
   local row = vim.api.nvim_win_get_cursor(state.winnr)[1]
-  local id  = state.line_map[row]
-  return id and entry_by_id(id)
+  return state.line_map[row]
+end
+
+local function job_at_cursor()
+  local ref = ref_at_cursor()
+  if not ref or ref.kind ~= "job" then return nil end
+  return entry_by_id(ref.id)
+end
+
+local function watch_at_cursor()
+  local ref = ref_at_cursor()
+  if not ref or ref.kind ~= "watch" then return nil end
+  local wm = watch_mod()
+  return wm and wm.get(ref.id) or nil
 end
 
 local function human_time(t)
@@ -431,7 +549,7 @@ local function open_details_float(lines)
     content_w = math.max(content_w, vim.fn.strdisplaywidth(l))
   end
 
-  local panel_w = (config.jobs and config.jobs.panel and config.jobs.panel.width) or 46
+  local panel_w = (config.jobs and config.jobs.panel and config.jobs.panel.width) or 44
   local max_w   = math.max(20, vim.o.columns - panel_w - 4)  -- room left of the panel
   local width   = math.max(20, math.min(content_w + 1, max_w))
   local height  = math.min(#lines, math.max(3, vim.o.lines - 4))
@@ -466,6 +584,80 @@ local function open_details_float(lines)
   return win
 end
 
+-- Details for a watch: what it is waiting for, how far it has got, and the
+-- per-tick log so you can see when the row count moved.
+local function watch_details(w)
+  local wm = watch_mod()
+  local lines = {
+    "Status:    " .. (w.status or "?") .. (w.detail and ("  (" .. w.detail .. ")") or ""),
+    "Waiting:   " .. (w.cond and w.cond.describe or "?"),
+    "Conn:      " .. (w.conn_name or "?"),
+    "Every:     " .. (wm and wm.fmt_duration(w.every) or (w.every .. "s")),
+    "Ticks:     " .. w.tick .. "/" .. ((w.max and w.max > 0) and w.max or "∞"),
+    "Rows:      " .. (w.rows ~= nil and tostring(w.rows) or "?"),
+    "Started:   " .. human_time(w.started_at),
+  }
+  if w.status == "running" then
+    local nxt = wm and wm.next_in(w)
+    table.insert(lines, "Next tick: " ..
+      (w.running_since and "running now" or (nxt and wm.fmt_duration(nxt) or "?")))
+  else
+    table.insert(lines, "Finished:  " .. human_time(w.finished_at))
+  end
+  if w.last_err then
+    table.insert(lines, "Error:     " .. (wm and wm.brief_error(w.last_err) or tostring(w.last_err)))
+  end
+
+  table.insert(lines, "")
+  table.insert(lines, "Query:")
+  for _, q in ipairs(vim.split(w.sql or "", "\n", { plain = true })) do
+    table.insert(lines, "  " .. q)
+  end
+
+  if #(w.log or {}) > 0 then
+    table.insert(lines, "")
+    table.insert(lines, "Ticks:")
+    for i, e in ipairs(w.log) do
+      local when = os.date("%H:%M:%S", e.at)
+      local body
+      if e.err then
+        body = "error: " .. tostring(e.err)
+      else
+        body = string.format("%s rows  %.2fs%s",
+          e.rows ~= nil and tostring(e.rows) or "?", e.elapsed or 0,
+          e.note and ("  — " .. e.note) or "")
+      end
+      table.insert(lines, string.format("  %3d  %s  %s", i, when, body))
+    end
+  end
+  return lines
+end
+
+local function job_details(j)
+  local missing = j.status == "done" and vim.fn.filereadable(j.path or "") ~= 1
+  local lines = {
+    "Status:   " .. (j.status or "?") .. (missing and "  (file missing)" or ""),
+    "File:     " .. (j.path or "?"),
+    "Format:   " .. (j.format or "?"),
+    "Conn:     " .. (j.conn_name or "?"),
+    "Rows:     " .. (j.rows ~= nil and tostring(j.rows) or "?"),
+    "Duration: " .. format_duration(j),
+    "Started:  " .. human_time(j.started_at),
+    "Finished: " .. human_time(j.finished_at),
+  }
+  if j.error and j.error ~= "" then
+    table.insert(lines, "Error:    " .. tostring(j.error))
+  end
+  if j.query and j.query ~= "" then
+    table.insert(lines, "")
+    table.insert(lines, "Query:")
+    for _, q in ipairs(vim.split(j.query, "\n", { plain = true })) do
+      table.insert(lines, "  " .. q)
+    end
+  end
+  return lines
+end
+
 local function setup_keymaps(bufnr)
   local km = (config.keymaps and config.keymaps.jobs) or {}
 
@@ -487,7 +679,39 @@ local function setup_keymaps(bufnr)
     vim.cmd("tabedit " .. vim.fn.fnameescape(path))
   end
 
+  -- A watch's latest snapshot goes into the normal result window, so paging,
+  -- `gi` inspect, export and history navigation all work on it unchanged.
+  local function open_watch(w)
+    if not w.last_result then
+      vim.notify("dblite: watch has no result yet", vim.log.levels.INFO)
+      return
+    end
+    local target = state.prev_winnr
+    if target and vim.api.nvim_win_is_valid(target) then
+      vim.api.nvim_set_current_win(target)
+    end
+    if not (config.jobs and config.jobs.close_on_open == false) then
+      M.close()
+    end
+    require("dblite").show_result(w.last_result, { query = w.sql, conn = w.conn_name })
+  end
+
   map(km.open or "<CR>", function()
+    local ref = ref_at_cursor()
+    if not ref then return end
+
+    if ref.kind == "history_toggle" then
+      state.history_open = not state.history_open
+      render()
+      return
+    end
+
+    if ref.kind == "watch" then
+      local w = watch_at_cursor()
+      if w then open_watch(w) end
+      return
+    end
+
     local j = job_at_cursor()
     if not j then return end
     if j.status == "running" then
@@ -507,34 +731,20 @@ local function setup_keymaps(bufnr)
       return
     end
     open_output(j.path)
-  end, "dblite: open job output")
+  end, "dblite: open entry under cursor")
+
+  -- <Tab> folds/unfolds history from anywhere in the panel.
+  map(km.fold or "<Tab>", function()
+    state.history_open = not state.history_open
+    render()
+  end, "dblite: fold/unfold history")
 
   map(km.hover or "K", function()
+    local w = watch_at_cursor()
+    if w then open_details_float(watch_details(w)); return end
     local j = job_at_cursor()
-    if not j then return end
-    local missing = j.status == "done" and vim.fn.filereadable(j.path or "") ~= 1
-    local lines = {
-      "Status:   " .. (j.status or "?") .. (missing and "  (file missing)" or ""),
-      "File:     " .. (j.path or "?"),
-      "Format:   " .. (j.format or "?"),
-      "Conn:     " .. (j.conn_name or "?"),
-      "Rows:     " .. (j.rows ~= nil and tostring(j.rows) or "?"),
-      "Duration: " .. format_duration(j),
-      "Started:  " .. human_time(j.started_at),
-      "Finished: " .. human_time(j.finished_at),
-    }
-    if j.error and j.error ~= "" then
-      table.insert(lines, "Error:    " .. tostring(j.error))
-    end
-    if j.query and j.query ~= "" then
-      table.insert(lines, "")
-      table.insert(lines, "Query:")
-      for _, q in ipairs(vim.split(j.query, "\n", { plain = true })) do
-        table.insert(lines, "  " .. q)
-      end
-    end
-    open_details_float(lines)
-  end, "dblite: hover job details")
+    if j then open_details_float(job_details(j)) end
+  end, "dblite: hover entry details")
 
   map(km.relocate or "r", function()
     local j = job_at_cursor()
@@ -547,6 +757,20 @@ local function setup_keymaps(bufnr)
   end, "dblite: relocate job output file")
 
   local function cancel_or_delete()
+    local w = watch_at_cursor()
+    if w then
+      local wm = watch_mod()
+      if not wm then return end
+      if w.status == "running" then
+        if not confirm("Stop watch?\n\n" .. (w.label or "")) then return end
+        wm.stop(w.id)
+        vim.notify("dblite: watch stopped — " .. (w.label or ""), vim.log.levels.INFO)
+      else
+        wm.remove(w.id)
+      end
+      return
+    end
+
     local j = job_at_cursor()
     if not j then return end
     if j.status == "running" then
@@ -561,16 +785,16 @@ local function setup_keymaps(bufnr)
   end
 
   local cancel_lhs = km.cancel or "x"
-  map(cancel_lhs, cancel_or_delete, "dblite: cancel / delete job")
+  map(cancel_lhs, cancel_or_delete, "dblite: stop / delete entry")
   if cancel_lhs == "x" then
-    map("X", cancel_or_delete, "dblite: cancel / delete job")
+    map("X", cancel_or_delete, "dblite: stop / delete entry")
   end
 
-  map(km.close or "q", function() M.close() end, "dblite: close jobs panel")
+  map(km.close or "q", function() M.close() end, "dblite: close panel")
 
   -- Optional: same key you opened the panel with can close it from inside.
   -- Off by default (""); set to your open key's lhs for symmetry.
-  map(km.toggle, function() M.toggle() end, "dblite: toggle jobs panel")
+  map(km.toggle, function() M.toggle() end, "dblite: toggle panel")
 end
 
 -- Open the panel. opts.focus = false leaves the cursor in the previous window
@@ -605,7 +829,7 @@ function M.open(opts)
   -- coexists with the editor/result windows. winfixwidth keeps its width steady
   -- as other splits open and close.
   local panel_cfg = config.jobs and config.jobs.panel or {}
-  local width = panel_cfg.width or 46
+  local width = panel_cfg.width or 44
   vim.cmd("botright " .. width .. "vsplit")
   local winnr = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(winnr, state.bufnr)
@@ -619,13 +843,16 @@ function M.open(opts)
   vim.wo[winnr].winfixwidth    = true
 
   load_history()  -- pick up entries from past sessions / other instances
+  if history_cfg().start_open then state.history_open = true end
   render()
+  start_ticker()
 
   vim.api.nvim_create_autocmd("WinClosed", {
     pattern  = tostring(winnr),
     once     = true,
     callback = function()
       state.winnr = nil
+      stop_ticker()
     end,
   })
 
@@ -635,6 +862,7 @@ function M.open(opts)
 end
 
 function M.close()
+  stop_ticker()
   if state.winnr and vim.api.nvim_win_is_valid(state.winnr) then
     vim.api.nvim_win_close(state.winnr, true)
   end

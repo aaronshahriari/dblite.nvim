@@ -7,6 +7,7 @@ local load_mod     = require("dblite.load")
 local jobs         = require("dblite.jobs")
 local binds_mod    = require("dblite.binds")
 local inline       = require("dblite.inline")
+local watch        = require("dblite.watch")
 
 local M = {}
 
@@ -73,9 +74,11 @@ local EDITOR_ACTIONS = {
   { key = "run_at",       desc = "run statement at cursor", fn = function() M.execute_at_cursor() end },
   { key = "run_script",   desc = "run buffer as script",    fn = function() M.execute_script() end },
   { key = "run_bulk",     desc = "bulk background export",  fn = function() M.run_async() end },
+  { key = "watch",        desc = "watch statement at cursor",fn = function() M.watch() end },
+  { key = "watch_file",   desc = "watch whole buffer",      fn = function() M.watch_file() end },
   { key = "toggle_dbout", desc = "toggle result window",    fn = function() M.toggle_dbout() end },
   { key = "toggle_panel", desc = "toggle connections panel",fn = function() M.toggle_panel() end },
-  { key = "toggle_jobs",  desc = "toggle jobs panel",       fn = function() M.toggle_jobs() end },
+  { key = "toggle_jobs",  desc = "toggle activity panel",   fn = function() M.toggle_jobs() end },
   { key = "inspect",      desc = "inspect current page",    fn = function() M.inspect() end },
   { key = "binds",        desc = "edit bind parameters",    fn = function() M.edit_binds() end },
   { key = "connections",  desc = "edit connections file",   fn = function() M.edit_connections_file() end },
@@ -88,9 +91,11 @@ local GLOBAL_ACTIONS = {
   { key = "run_at",       desc = "run statement at cursor", fn = function() M.execute_at_cursor() end },
   { key = "run_script",   desc = "run buffer as script",    fn = function() M.execute_script() end },
   { key = "run_bulk",     desc = "bulk background export",  fn = function() M.run_async() end },
+  { key = "watch",        desc = "watch statement at cursor",fn = function() M.watch() end },
+  { key = "watch_file",   desc = "watch whole buffer",      fn = function() M.watch_file() end },
   { key = "toggle_dbout", desc = "toggle result window",    fn = function() M.toggle_dbout() end },
   { key = "toggle_panel", desc = "toggle connections panel",fn = function() M.toggle_panel() end },
-  { key = "toggle_jobs",  desc = "toggle jobs panel",       fn = function() M.toggle_jobs() end },
+  { key = "toggle_jobs",  desc = "toggle activity panel",   fn = function() M.toggle_jobs() end },
   { key = "toggle_binds", desc = "toggle binds window",     fn = function() M.toggle_binds() end },
   { key = "inspect",      desc = "inspect current page",    fn = function() M.inspect() end },
   { key = "fullscreen",   desc = "toggle dbout fullscreen", fn = function() M.toggle_fullscreen() end },
@@ -114,6 +119,9 @@ local function apply_global_keymaps()
       if a.key == "run_bulk" then
         vim.keymap.set("x", lhs, M.run_bulk_visual,
           { silent = true, desc = "dblite: bulk export selection" })
+      elseif a.key == "watch" then
+        vim.keymap.set("x", lhs, M.watch_visual,
+          { silent = true, desc = "dblite: watch selection" })
       end
       installed_global_keymaps[a.key] = lhs
     end
@@ -129,10 +137,13 @@ function M.attach(buf)
     if lhs and lhs ~= "" then
       vim.keymap.set("n", lhs, a.fn,
         { buffer = buf, silent = true, desc = "dblite: " .. a.desc })
-      -- run_bulk also works on a visual selection (dumps the touched statements)
+      -- run_bulk and watch also work on a visual selection (the statements it touches)
       if a.key == "run_bulk" then
         vim.keymap.set("x", lhs, M.run_bulk_visual,
           { buffer = buf, silent = true, desc = "dblite: bulk export selection" })
+      elseif a.key == "watch" then
+        vim.keymap.set("x", lhs, M.watch_visual,
+          { buffer = buf, silent = true, desc = "dblite: watch selection" })
       end
     end
   end
@@ -154,6 +165,19 @@ function M.setup(opts)
     pattern  = fts,
     group    = vim.api.nvim_create_augroup("dblite_sql_keymaps", { clear = true }),
     callback = function(ev) M.attach(ev.buf) end,
+  })
+
+  -- Watches are session-local, so quitting silently throws them away. Say so
+  -- rather than letting a poll you were waiting on disappear unannounced.
+  vim.api.nvim_create_autocmd("VimLeavePre", {
+    group    = vim.api.nvim_create_augroup("dblite_watch_guard", { clear = true }),
+    callback = function()
+      local n = #watch.active()
+      if n > 0 then
+        vim.notify(string.format("dblite: %d watch(es) still running — they stop with this session", n),
+          vim.log.levels.WARN)
+      end
+    end,
   })
 end
 
@@ -806,6 +830,169 @@ local function execute_core(query, script)
   end
 end
 
+-- Push a result produced outside the normal run path — currently a watch's
+-- latest snapshot — into the result window as if it had just been run. It goes
+-- through the same history ring as everything else, so paging, `gi` inspect,
+-- export and `[`/`]` navigation work on it unchanged.
+--
+--   res   a `dblite.inline` result (columns, column_types, rows, json, elapsed)
+--   opts  { query = <sql shown on hover>, conn = <connection name> }
+function M.show_result(res, opts)
+  if not res then return end
+  opts = opts or {}
+  ensure_result_buffer()
+
+  state.columns      = res.columns      or {}
+  state.column_types = res.column_types or {}
+  state.rows         = res.rows         or {}
+  state.widths       = compute_widths(state.rows, state.columns)
+  state.page         = 1
+  state.last_elapsed = res.elapsed
+  state.raw_json     = res.json
+
+  local max_hist = config.max_history or 20
+  table.insert(state.history, {
+    columns      = state.columns,
+    column_types = state.column_types,
+    rows         = state.rows,
+    widths       = state.widths,
+    raw_json     = state.raw_json,
+    last_elapsed = state.last_elapsed,
+    conn_name    = opts.conn,
+    query_text   = opts.query,
+    update_count = res.update_count,
+  })
+  if max_hist > 0 and #state.history > max_hist then
+    table.remove(state.history, 1)
+  end
+  state.history_idx = #state.history
+
+  if res.update_count ~= nil then
+    set_status(string.format("-- %d row(s) affected  (%.2fs)",
+      res.update_count, res.elapsed or 0))
+  else
+    render_page()
+  end
+end
+
+-- --- Watches --------------------------------------------------------------
+
+-- Shared tail of M.watch / M.watch_file: freeze the statement's binds against
+-- the active connection, then either start straight away (a spec was given) or
+-- open the popup first. Binds are resolved here, once, so editing
+-- dblite.binds.json while a watch is polling never changes what it runs.
+local function start_watch(query, label, spec_str)
+  if vim.fn.executable(config.binary) ~= 1 then
+    local hint = _plugin_root
+      and "run :DbliteBuild to compile the native binary"
+      or  "binary 'dblite' not found on PATH — run the build first"
+    vim.notify("dblite: " .. hint, vim.log.levels.ERROR)
+    return
+  end
+  if not state.active_conn then
+    vim.notify("dblite: no active connection — use :DbliteUseConn <name>", vim.log.levels.ERROR)
+    return
+  end
+
+  local final_q    = query
+  local bind_names = binds_mod.parse_names(query)
+  if #bind_names > 0 then
+    local file_binds = binds_mod.flatten(binds_mod.load_file())
+    local missing = vim.tbl_filter(function(n) return file_binds[n] == nil end, bind_names)
+    if #missing > 0 then
+      vim.notify(
+        "dblite: missing bind params: " .. table.concat(missing, ", ")
+        .. "\nAdd them to dblite.binds.json and re-run.",
+        vim.log.levels.WARN)
+      M.open_binds()
+      return
+    end
+    final_q = binds_mod.apply(query, file_binds)
+  end
+
+  local conn_name = state.active_conn.name
+
+  local function launch(spec)
+    local id, err = watch.start({
+      sql               = final_q,
+      conn              = conn_name,
+      label             = label,
+      every             = spec.every,
+      max               = spec.max,
+      cond              = spec.cond,
+      stop_after_errors = spec.stop_after_errors,
+    })
+    if not id then
+      vim.notify(tostring(err), vim.log.levels.ERROR)
+      return
+    end
+    local w = watch.get(id)
+    vim.notify(string.format("dblite: watching %s every %s until %s",
+      label, watch.fmt_duration(w.every), w.cond.describe), vim.log.levels.INFO)
+    if not (config.jobs and config.jobs.open_on_start == false) then
+      jobs.open({ focus = false })
+    end
+  end
+
+  if spec_str and spec_str:match("%S") then
+    local spec, err = watch.parse_spec(spec_str)
+    if not spec then
+      vim.notify("dblite: " .. tostring(err), vim.log.levels.ERROR)
+      return
+    end
+    launch(spec)
+    return
+  end
+
+  if (config.watch or {}).prompt == false then
+    launch({})
+    return
+  end
+
+  watch.prompt({ label = label, sql = final_q }, function(spec)
+    if spec then launch(spec) end
+  end)
+end
+
+-- Watch the statement under the cursor (or the statements a range touches).
+function M.watch(spec_str, range)
+  local bufnr = vim.api.nvim_get_current_buf()
+  local sr, sc, er, ec, query
+  if range then
+    sr, sc, er, ec, query = query_module.at_range(bufnr, range.line1, range.line2)
+  else
+    sr, sc, er, ec, query = query_module.at_cursor(bufnr)
+  end
+  if not query or query:match("^%s*$") then
+    vim.notify("dblite: no query at cursor", vim.log.levels.WARN)
+    return
+  end
+  if sr then set_flash(bufnr, sr, sc, er, ec) end
+
+  local name = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":t")
+  local label = name ~= "" and (name .. ":" .. (sr + 1)) or query:gsub("%s+", " "):sub(1, 32)
+  start_watch(query, label, spec_str)
+end
+
+-- Watch the whole buffer as one statement.
+function M.watch_file(spec_str)
+  local bufnr = vim.api.nvim_get_current_buf()
+  local query = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), "\n")
+  if query:match("^%s*$") then
+    vim.notify("dblite: buffer is empty", vim.log.levels.WARN)
+    return
+  end
+  local name = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":t")
+  start_watch(query, name ~= "" and name or "buffer", spec_str)
+end
+
+-- Watch the current visual selection.
+function M.watch_visual()
+  local a, b = vim.fn.line("v"), vim.fn.line(".")
+  vim.cmd("normal! \27")  -- <Esc>: leave visual mode before any popup
+  M.watch(nil, { line1 = math.min(a, b), line2 = math.max(a, b) })
+end
+
 function M.execute()
   local query = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
   execute_core(query)
@@ -1008,6 +1195,30 @@ end, {
 })
 
 vim.api.nvim_create_user_command("DbliteJobs", function() jobs.toggle() end, {})
+
+-- :DbliteWatch [spec]  — watch the statement at the cursor (or a :'<,'> range).
+-- With no spec the settings popup opens; with one it starts immediately:
+--   :DbliteWatch 30s x50
+--   :DbliteWatch every=2m until=rows>5
+--   :DbliteWatch 1m for=1h until=STATUS=DONE
+vim.api.nvim_create_user_command("DbliteWatch", function(opts)
+  local range = (opts.range and opts.range > 0) and { line1 = opts.line1, line2 = opts.line2 } or nil
+  M.watch(opts.args, range)
+end, { nargs = "*", range = true })
+
+vim.api.nvim_create_user_command("DbliteWatchFile", function(opts)
+  M.watch_file(opts.args)
+end, { nargs = "*" })
+
+vim.api.nvim_create_user_command("DbliteWatchStop", function()
+  local n = #watch.active()
+  if n == 0 then
+    vim.notify("dblite: no watches running", vim.log.levels.INFO)
+    return
+  end
+  watch.stop_all()
+  vim.notify("dblite: stopped " .. n .. " watch(es)", vim.log.levels.INFO)
+end, {})
 
 -- :DbliteBuild  — download a pre-built binary from GitHub Releases, or build
 --                 from source if none matches the platform.
@@ -1850,6 +2061,15 @@ do
       else M.execute() end
     end,
     jobs          = function() jobs.toggle() end,
+    watch         = function(a, range)
+      if a[2] == "stop" then
+        vim.cmd("DbliteWatchStop")
+      elseif a[2] == "file" then
+        M.watch_file(table.concat(vim.list_slice(a, 3), " "))
+      else
+        M.watch(table.concat(vim.list_slice(a, 2), " "), range)
+      end
+    end,
     toggle        = function(a)
       if     a[2] == "panel" then M.toggle_panel()
       elseif a[2] == "dbout" then M.toggle_dbout()
@@ -1882,11 +2102,12 @@ do
     local n = #tokens
     if n == 2 then
       return vim.tbl_filter(function(k) return k:sub(1, #arg_lead) == arg_lead end,
-        { "run", "jobs", "toggle", "conn", "build", "inspect", "export", "binds", "load" })
+        { "run", "watch", "jobs", "toggle", "conn", "build", "inspect", "export", "binds", "load" })
     elseif n == 3 then
       local sub = tokens[2]
       local opts = {
         run     = { "at", "script", "bulk" },
+        watch   = { "file", "stop", "every=", "until=", "max=", "for=" },
         jobs    = {},
         build   = { "force" },
         toggle  = { "panel", "dbout", "jobs" },

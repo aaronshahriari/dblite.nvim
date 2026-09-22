@@ -39,8 +39,8 @@ local M = {
   panel = {
     width = 30,  -- columns for the side panel
   },
-  jobs = {  -- background (async) bulk-export jobs — see `:Dblite run bulk`
-    panel = { width = 46 },  -- background-jobs panel: right-side vertical split, this many columns wide
+  jobs = {  -- the activity panel: bulk exports (`:Dblite run bulk`) and watches
+    panel = { width = 44 },  -- activity panel: right-side vertical split, this many columns wide
     cleanup_delay  = 300,    -- seconds a finished job lingers in the LIVE list before removal (it stays visible via history); 0 = keep until deleted
     default_format = "csv",  -- default output format for bulk exports: "csv" | "json"
     open_on_start  = true,   -- pop the jobs panel open automatically when a bulk export starts
@@ -49,9 +49,21 @@ local M = {
     history = {  -- persistent job history, shared across all Neovim instances
       enabled     = true,    -- record finished jobs to disk (false = in-memory only)
       show        = 20,      -- how many past jobs to display in the panel (0 = all kept)
+      start_open  = false,   -- expand the folded History section when the panel opens
       max_entries = 200,     -- hard cap on stored jobs; oldest are dropped past this
       -- file: defaults to stdpath("data").."/dblite/jobs.json". Set to override.
     },
+  },
+  watch = {  -- repeating queries — see `:DbliteWatch`
+    default_interval  = "30s",      -- time between ticks when none is given
+    default_max       = 50,         -- tick cap when none is given; 0 = unlimited
+    default_condition = "changed",  -- what to wait for by default; see :h dblite-watch-conditions
+    max_active        = 5,          -- refuse to start more than this many at once (0 = no cap)
+    stop_after_errors = 3,          -- consecutive failed ticks before giving up (0 = never)
+    notify            = true,       -- vim.notify when a watch matches, fails, or runs out
+    cleanup_delay     = 0,          -- seconds a finished watch lingers in the panel; 0 = until dismissed
+    log_size          = 100,        -- per-watch tick log entries kept for the hover view
+    prompt            = true,       -- `:DbliteWatch` with no args opens the popup; false = use defaults
   },
   -- How `:DblitePanel` / `M.toggle_panel()` select a connection:
   --   "panel"     → the built-in side panel (default)
@@ -97,6 +109,8 @@ local M = {
       run_at        = "", -- run the statement under the cursor
       run_script    = "", -- run the buffer as a SQL*Plus script
       run_bulk      = "", -- background bulk export to a file
+      watch         = "", -- watch the statement under the cursor
+      watch_file    = "", -- watch the whole buffer
       toggle_dbout  = "", -- show/hide the result window
       toggle_panel  = "", -- toggle the connections panel
       toggle_jobs   = "", -- toggle the background-jobs panel
@@ -125,6 +139,8 @@ local M = {
       run_at       = "",           -- run the statement under the cursor  (M.execute_at_cursor)
       run_script   = "",           -- run the buffer as a SQL*Plus script (M.execute_script)
       run_bulk     = "",           -- background bulk export to a file    (M.run_async)
+      watch        = "",           -- watch the statement under the cursor (M.watch)
+      watch_file   = "",           -- watch the whole buffer               (M.watch_file)
       toggle_dbout = "",           -- show/hide the result window         (M.toggle_dbout)
       toggle_panel = "",           -- toggle the connections panel        (M.toggle_panel)
       toggle_jobs  = "",           -- toggle the background-jobs panel     (M.toggle_jobs)
@@ -143,13 +159,14 @@ local M = {
     binds = {     -- keymaps active inside dblite.binds.json
       toggle = "",     -- toggle the binds window from inside
     },
-    jobs = {     -- keymaps active inside the background-jobs panel
-      open     = "<CR>", -- open the output file of the job under cursor
-      cancel   = "x",    -- cancel a running job / delete a finished one from panel + history; default also maps "X"
-      hover    = "K",    -- hover to show the full export path + details of the job under cursor
-      relocate = "r",    -- re-point a job at a moved/renamed output file (persists the new path)
-      close    = "q",    -- close the jobs panel
-      toggle   = "",     -- toggle the panel from inside (set to your open key for symmetry)
+    jobs = {     -- keymaps active inside the activity panel
+      open     = "<CR>",  -- job: open its output file · watch: show its latest result in dbout
+      cancel   = "x",     -- stop a running job/watch, or remove a finished one; default also maps "X"
+      hover    = "K",     -- details of the entry under the cursor (watches include their tick log)
+      relocate = "r",     -- re-point a job at a moved/renamed output file (persists the new path)
+      fold     = "<Tab>", -- fold/unfold the finished-exports History section
+      close    = "q",     -- close the panel
+      toggle   = "",      -- toggle the panel from inside (set to your open key for symmetry)
     },
     load = {     -- keymaps active inside the CSV-load preview buffer
       commit = "<CR>", -- run the generated INSERTs

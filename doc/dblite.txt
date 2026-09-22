@@ -189,12 +189,9 @@ buffers the result in the editor, so it handles arbitrarily large exports
 queries while it churns. There is no client-side query timeout, so a bulk
 export runs until the database returns.
 
-`:Dblite jobs` (or |:DbliteJobs|) toggles the floating jobs panel, which lists
-each background export with status, output file name, duration, and exported
-row count. In the panel: `<CR>` opens a finished job's output file in a new tab,
-`x` prompts to cancel a running job (or delete a finished one from history), and
-`q` closes it. Keys are configurable via `keymaps.jobs`; panel size and
-behaviour via the `jobs` config table.
+`:Dblite jobs` (or |:DbliteJobs|) toggles the activity panel, which lists
+background exports alongside any running watches — see |dblite-panel-activity|
+for its layout and keys.
 
 Finished jobs are recorded to a shared store (default
 `stdpath('data')/dblite/jobs.json`), so the panel shows past exports across
@@ -210,6 +207,116 @@ Note: bulk export requires a native binary that includes `--to-file` support.
 If you installed a pre-built release binary, force a source rebuild with
 |:DbliteBuild|! (`:DbliteBuild!` or `:Dblite build force`) to pick it up —
 plain |:DbliteBuild| downloads the latest release, which may not include it yet.
+
+Watching a query ~					*dblite-watch*
+
+`:Dblite watch [spec]` (or |:DbliteWatch|) re-runs the statement under the
+cursor on an interval until something you are waiting for happens, then
+notifies you. It is for the queries you would otherwise sit and re-run by hand
+waiting for a row to land.
+
+	`:DbliteWatch`                             open the settings popup
+	`:DbliteWatch 30s x50`                     every 30s, at most 50 ticks
+	`:DbliteWatch every=2m until=rows>5`       until more than 5 rows return
+	`:DbliteWatch 1m for=1h until=STATUS=DONE` every minute for an hour
+	`:'<,'>DbliteWatch 10s`                    watch the selected statement(s)
+	`:DbliteWatchFile 30s`                     watch the whole buffer
+	`:DbliteWatchStop`                         stop every running watch
+
+With no spec the popup opens: a small float whose four settings (`every`,
+`until`, `max`, `errors`) are ordinary text, so normal motions and `ciw` work
+on them. `<CR>` starts, `q` or `<Esc>` cancels. An invalid value reports the
+problem and leaves the popup open rather than starting a broken watch. Set
+`watch.prompt = false` to skip it and use the configured defaults.
+
+SPEC							*dblite-watch-spec*
+
+A spec is a space-separated list of `key=value` pairs, with two shorthands: a
+bare duration sets the interval, and `xN` sets the tick cap.
+
+	`every=`	Time between ticks — `30s`, `2m`, `1h`, or a bare number
+		of seconds. A bare duration in the spec means the same.
+	`max=`		Tick cap; `0` means unlimited. `times=` and `xN` are
+		aliases.
+	`for=`		A wall-clock budget converted into a tick cap by
+		dividing by the interval.
+	`until=`	What to wait for — see |dblite-watch-conditions|.
+	`errors=`	Consecutive failed ticks before the watch gives up;
+		`0` means never.
+
+CONDITIONS						*dblite-watch-conditions*
+
+The condition lives in the watch rather than in the SQL, so you do not have to
+rewrite the query to poll it.
+
+	`changed`		Result differs from the first tick (the default)
+	`rows>5`		Row-count comparison: `>` `>=` `<` `<=` `=` `!=`
+	`STATUS=DONE`	Any row whose STATUS column equals DONE
+	`NAME~aaron`	Any row whose NAME column contains "aaron"
+			(case-insensitive substring)
+	`STATUS!=PENDING`	Any row whose STATUS column is not PENDING
+	`never`		Never match; just run to the tick cap
+
+Column names are matched case-insensitively, which matters for databases that
+return upper-case labels; values are matched exactly. If the result has no such
+column you get one warning rather than a watch that silently never fires.
+
+A watch stops on the first match, at its tick cap, after `errors` consecutive
+failures, or when you stop it by hand, and notifies either way — naming what
+matched: >
+
+	dblite: watch matched — orders.sql:12 · STATUS=DONE (row 3)
+<
+BEHAVIOUR						*dblite-watch-behaviour*
+
+Ticks are chained, not intervalled: the next run is scheduled when the previous
+one finishes, so a query that outlives its interval delays the next tick instead
+of stacking a second one on top of it.
+
+The connection name and the bind values are frozen when the watch starts, so
+switching the active connection or editing `dblite.binds.json` while a watch is
+polling never changes what it runs. Each tick spawns a fresh process, so no
+connection is held open between ticks.
+
+Watches are session-local and never persisted — a killed Neovim leaves no ghost
+behind, and quitting with watches running warns you first. `watch.max_active`
+(default 5) caps how many may run at once, so you cannot quietly accumulate a
+dozen forgotten pollers.
+
+The activity panel ~				*dblite-panel-activity*
+
+`:Dblite jobs` (or |:DbliteJobs|) toggles a right-side panel listing everything
+dblite has in flight: watches first, then running background exports, with
+finished exports folded behind a single line. >
+
+	  dblite
+
+	  ◐ orders.sql:12      7/50 · 6 rows · 24s
+	  ◐ queue_depth.sql:4   3/∞ · 112 rows · run
+	  ⋯ big_dump.csv          running · ? rows
+
+	  ▸ History (18)
+<
+A watch line reads tick/cap, row count, and the time until its next tick (or
+`run` while a tick is in flight). The panel redraws once a second while anything
+is live, so the countdown stays honest.
+
+	`<CR>`	Job: open its output file in a new tab. Watch: show its
+		latest result in dbout. History line: fold/unfold.
+	`K`	Details of the entry under the cursor; a watch includes its
+		full per-tick log.
+	`x`	Stop a running watch/job, or remove a finished one.
+	`r`	Re-point a job at a moved/renamed output file.
+	`<Tab>`	Fold/unfold the finished-exports History section.
+	`q`	Close the panel.
+
+Pressing `<CR>` on a watch pushes its latest snapshot into the normal result
+window through the usual history ring, so paging, |dblite-inspect|, export and
+`[` / `]` history navigation all work on it unchanged.
+
+Keys are configurable via `keymaps.jobs`; panel size and behaviour via the
+`jobs` config table, and watch defaults via the `watch` table — see
+|dblite-config|.
 
 Loading CSV data ~					*dblite-load*
 
@@ -409,10 +516,15 @@ Unified entry point ~
 :Dblite run bulk <fmt> [path]	Run the current query in the background,
 				streaming the full result to a file. See
 				|dblite-bulk|.
-:Dblite jobs			Toggle the background-jobs panel.
+:Dblite watch [spec]		Re-run the statement at the cursor on an
+				interval until a condition matches. See
+				|dblite-watch|.
+:Dblite watch file [spec]	Same, watching the whole buffer.
+:Dblite watch stop		Stop every running watch.
+:Dblite jobs			Toggle the activity panel.
 :Dblite toggle panel		Toggle the connections panel.
 :Dblite toggle dbout		Toggle the result window.
-:Dblite toggle jobs		Toggle the background-jobs panel.
+:Dblite toggle jobs		Toggle the activity panel.
 :Dblite conn add [uri]		Add a connection.
 :Dblite conn list		List connections.
 :Dblite conn use <name>		Set the active connection.
@@ -441,8 +553,21 @@ Individual commands ~
 				omitted. Accepts a range (:'<,'>DbliteRunBulk)
 				to export the selected statement(s).
 				See |dblite-bulk|.
+							*:DbliteWatch*
+:DbliteWatch [spec]		Watch the statement under the cursor: re-run
+				it on an interval until a condition matches.
+				With no spec the settings popup opens.
+				Accepts a range (:'<,'>DbliteWatch) to watch
+				the selected statement(s). See |dblite-watch|
+				and |dblite-watch-spec|.
+							*:DbliteWatchFile*
+:DbliteWatchFile [spec]		Watch the whole buffer as one statement.
+							*:DbliteWatchStop*
+:DbliteWatchStop		Stop every running watch.
 							*:DbliteJobs*
-:DbliteJobs			Toggle the background-jobs panel.
+:DbliteJobs			Toggle the activity panel: watches and
+				background exports. See
+				|dblite-panel-activity|.
 							*:DblitePanel*
 :DblitePanel			Toggle the connections panel.
 							*:DbliteAddConn*
@@ -650,8 +775,8 @@ defaults, so you only need to specify what you change. Defaults: >lua
 	    jobs  = { open = '<CR>', cancel = 'x', close = 'q', toggle = '' },
 	    load  = { commit = '<CR>', cancel = 'q' },
 	  },
-	  jobs = {                          -- background bulk-export jobs
-	    panel = { width = 46 },
+	  jobs = {                          -- activity panel: exports + watches
+	    panel = { width = 44 },
 	    cleanup_delay  = 300,           -- secs a finished job stays in the live
 	                                    --   list; 0 = keep until dismissed
 	    default_format = 'csv',         -- default bulk format: 'csv' | 'json'
@@ -660,9 +785,22 @@ defaults, so you only need to specify what you change. Defaults: >lua
 	    history = {                     -- persistent, shared across instances
 	      enabled     = true,           -- record finished jobs to disk
 	      show        = 20,             -- past jobs to display (0 = all kept)
+	      start_open  = false,          -- expand the History fold on open
 	      max_entries = 200,            -- hard cap kept on disk
 	      -- file = stdpath('data')..'/dblite/jobs.json'  -- override location
 	    },
+	  },
+	  watch = {                         -- repeating queries (:Dblite watch)
+	    default_interval  = '30s',      -- time between ticks
+	    default_max       = 50,         -- tick cap; 0 = unlimited
+	    default_condition = 'changed',  -- what to wait for by default
+	    max_active        = 5,          -- max concurrent watches (0 = no cap)
+	    stop_after_errors = 3,          -- failed ticks before giving up
+	    notify            = true,       -- notify on match/failure/expiry
+	    cleanup_delay     = 0,          -- secs a finished watch lingers in the
+	                                    --   panel; 0 = until dismissed
+	    log_size          = 100,        -- tick-log entries kept per watch
+	    prompt            = true,       -- no-arg :DbliteWatch opens the popup
 	  },
 	})
 <
@@ -679,6 +817,13 @@ All functionality is available programmatically: >lua
 	                           --   fmt/path optional (prompts if omitted);
 	                           --   range = {line1=,line2=} exports a selection
 	db.run_bulk_visual()       -- bulk-export the current visual selection
+	db.watch(spec, range)      -- watch the statement at the cursor; spec is a
+	                           --   string like '30s x50 until=rows>5' (nil
+	                           --   opens the popup). See |dblite-watch|.
+	db.watch_file(spec)        -- watch the whole buffer
+	db.watch_visual()          -- watch the current visual selection
+	db.show_result(res, opts)  -- push a dblite.inline result into dbout;
+	                           --   opts = { query =, conn = }
 	db.toggle_dbout()          -- show/hide the result window
 	db.toggle_fullscreen()     -- toggle dbout fullscreen tab
 	db.inspect(format)         -- 'json' | 'table' | 'csv'

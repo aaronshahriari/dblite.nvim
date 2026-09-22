@@ -12,6 +12,9 @@
 :DbliteRunBulk	dblite.txt	/*:DbliteRunBulk*
 :DbliteToggleOut	dblite.txt	/*:DbliteToggleOut*
 :DbliteUseConn	dblite.txt	/*:DbliteUseConn*
+:DbliteWatch	dblite.txt	/*:DbliteWatch*
+:DbliteWatchFile	dblite.txt	/*:DbliteWatchFile*
+:DbliteWatchStop	dblite.txt	/*:DbliteWatchStop*
 db.inline()	dblite.txt	/*db.inline()*
 dblite	dblite.txt	/*dblite*
 dblite-api	dblite.txt	/*dblite-api*
@@ -36,9 +39,14 @@ dblite-introduction	dblite.txt	/*dblite-introduction*
 dblite-keymaps	dblite.txt	/*dblite-keymaps*
 dblite-load	dblite.txt	/*dblite-load*
 dblite-panel	dblite.txt	/*dblite-panel*
+dblite-panel-activity	dblite.txt	/*dblite-panel-activity*
 dblite-queries	dblite.txt	/*dblite-queries*
 dblite-quickstart	dblite.txt	/*dblite-quickstart*
 dblite-requirements	dblite.txt	/*dblite-requirements*
+dblite-watch	dblite.txt	/*dblite-watch*
+dblite-watch-behaviour	dblite.txt	/*dblite-watch-behaviour*
+dblite-watch-conditions	dblite.txt	/*dblite-watch-conditions*
+dblite-watch-spec	dblite.txt	/*dblite-watch-spec*
 dblite.nvim	dblite.txt	/*dblite.nvim*
 dblite.setup()	dblite.txt	/*dblite.setup()*
 dblite.txt	dblite.txt	/*dblite.txt*
