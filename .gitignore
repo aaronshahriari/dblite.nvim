@@ -10,6 +10,10 @@ target/
 .project
 .settings/
 
+# Python bytecode from the dev/test helpers
+__pycache__/
+*.pyc
+
 # OS/editor junk
 .DS_Store
 *.swp
