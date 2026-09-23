@@ -376,9 +376,14 @@ function M.env(conn)
   local env = { DB_URL = M.jdbc_url(conn) }
   local t = conn.type or "oracle"
   if t == "redis" then
-    -- Redis is frequently unauthenticated; only pass what was actually set.
-    if conn.user     and conn.user     ~= "" then env.DB_USER     = M.expand_env(conn.user)     end
-    if conn.password and conn.password ~= "" then env.DB_PASSWORD = M.expand_env(conn.password) end
+    -- Redis is frequently unauthenticated, but `vim.system` inherits the
+    -- parent environment, so a DB_PASSWORD exported in the user's shell (for
+    -- an unrelated database) would leak in and make dblite send AUTH to a
+    -- server with no password set — which fails the connection outright.
+    -- Always set both, blank when unconfigured; the binary reads empty as
+    -- absent, so a blank value masks whatever was inherited.
+    env.DB_USER     = (conn.user     and conn.user     ~= "") and M.expand_env(conn.user)     or ""
+    env.DB_PASSWORD = (conn.password and conn.password ~= "") and M.expand_env(conn.password) or ""
     -- SCAN's COUNT dominates how long a key listing takes, so it is tunable
     -- per install without a rebuild. See dblite-redis-performance.
     local redis_cfg = (require("dblite.config").redis or {})

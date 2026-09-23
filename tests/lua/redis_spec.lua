@@ -84,8 +84,13 @@ eq(connections.jdbc_url({ type = "redis", host = "::1", db = 1 }),
 
 local env = connections.env({ type = "redis", host = "h", db = 1 })
 eq(env.DB_URL, "redis://h:6379/1", "env url")
-eq(env.DB_USER, nil, "no user means no DB_USER")
-eq(env.DB_PASSWORD, nil, "no password means no DB_PASSWORD")
+
+-- `vim.system` inherits the parent environment, so an unrelated DB_PASSWORD
+-- exported in the user's shell would otherwise make dblite send AUTH to an
+-- unauthenticated Redis and fail the connection. Both vars must be set to a
+-- blank value, which the binary reads as absent, rather than left unset.
+eq(env.DB_USER, "", "an unconfigured user must mask an inherited DB_USER")
+eq(env.DB_PASSWORD, "", "an unconfigured password must mask an inherited DB_PASSWORD")
 
 env = connections.env({ type = "redis", host = "h", user = "alice", password = "pw" })
 eq(env.DB_USER, "alice", "env user")
