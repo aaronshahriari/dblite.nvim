@@ -89,7 +89,9 @@ local ui_path = vim.fn.stdpath("data") .. "/dblite/ui.json"
 local f = assert(io.open(ui_path, "r"), "ui.json should have been written")
 local saved = vim.json.decode(f:read("*a"))
 f:close()
-eq(saved.split_dir, "right", "split_dir persisted")
+-- The placement is remembered per connection type; with no connection active
+-- it lands under the generic `_default` key.
+eq(saved.split_dir._default, "right", "split_dir persisted")
 eq(saved.split_size.width, 61, "dragged width persisted")
 
 print("split_spec: ok")

@@ -25,6 +25,7 @@ target/
 
 # Local test scratch files
 test.sql
+scratch.redis
 
 # Compiled native binary (platform-specific; built by mvn -Pnative)
 bin/

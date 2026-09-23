@@ -38,6 +38,26 @@ local M = {
     height = 20,  -- rows;    used for an above/below split. 0 = let nvim decide.
   },
   filetype = "", -- buffer filetype for results. "" disables highlighting (fastest for huge results).
+  output = {
+    -- How a result is drawn. The grid is right for tabular replies and wrong
+    -- for a single document: `JSON.GET` returns one value, and a one-cell
+    -- table truncated at `max_col_width` shows almost none of it.
+    --   "auto" → a lone cell the backend typed `json` renders as JSON, a lone
+    --            multi-line cell renders as text, everything else is a grid
+    --   "grid" → always the table (the pre-0.8 behaviour)
+    --   "json" → pretty-print the first cell as JSON
+    --   "text" → the first cell verbatim, untruncated
+    mode = "auto",
+    json_indent = 2,     -- spaces per level in the JSON view
+    json_filetype = "jsonc", -- filetype for the JSON view; the status line is a
+                             -- `//` comment, so a json-with-comments dialect
+                             -- keeps the whole buffer parseable
+    -- Pin individual commands regardless of what detection would say. Keys are
+    -- matched case-insensitively against the statement's first word, so
+    -- `["JSON.GET"] = "json"` and `["json.get"] = "json"` are the same entry.
+    --   commands = { ["JSON.GET"] = "json", GET = "text", INFO = "grid" },
+    commands = {},
+  },
   page_size = 100,    -- rows per page in the result buffer
   max_col_width = 50, -- truncate cell values wider than this; 0 = no limit
   max_history = 20,        -- number of past query results kept in history; 0 = unlimited
@@ -94,6 +114,17 @@ local M = {
   --   "telescope" → a telescope.nvim picker (requires nvim-telescope/telescope.nvim)
   -- `:DbliteConnPicker` always opens the telescope picker regardless of this setting.
   connection_picker = "panel",
+  -- Per-connection-type overrides. Any of `split_dir`, `split_size`,
+  -- `filetype`, `page_size`, `max_col_width`, `show_column_types` and `output`
+  -- can be set per database type; the active connection decides which block
+  -- applies, and anything absent falls through to the top-level default above.
+  -- Redis and SQL want genuinely different windows — a tall right-hand pane
+  -- suits one document, a short wide one suits a result grid:
+  --   types = {
+  --     redis  = { split_dir = "right", split_size = { width = 90 } },
+  --     oracle = { split_dir = "below" },
+  --   }
+  types = {},
   telescope_picker = {  -- sizing/behaviour for the telescope connection picker
     preview       = true, -- show a side preview with connection details (password masked)
     width         = 0.4,  -- picker width:  fraction of editor (<= 1) or absolute columns (> 1)
@@ -142,6 +173,7 @@ local M = {
       inspect       = "", -- inspect current page untruncated
       fullscreen    = "", -- toggle dbout fullscreen
       cycle_split   = "", -- flip the result window between right and below
+      cycle_output  = "", -- cycle the result window between grid, json and text
       connections   = "", -- open the connections JSON file
     },
     dbout = {  -- keymaps active inside the result/output buffer
@@ -153,6 +185,7 @@ local M = {
       history_next = "]",       -- next query result in history
       hover_query  = "K",       -- hover to show the executed query
       toggle_types = "d",       -- toggle column type annotations
+      cycle_output = "go",      -- cycle this result between grid, json and text
       toggle_dbout = "",        -- show/hide the result window from inside dbout
       cycle_split  = "",        -- flip between a right-hand and a below split
     },

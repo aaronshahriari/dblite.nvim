@@ -8,6 +8,9 @@ local jobs         = require("dblite.jobs")
 local binds_mod    = require("dblite.binds")
 local inline       = require("dblite.inline")
 local watch        = require("dblite.watch")
+local output       = require("dblite.output")
+local json_fmt     = require("dblite.json")
+local devicons     = require("dblite.devicons")
 
 local M = {}
 
@@ -68,9 +71,38 @@ local state = {
   column_types    = {},  -- parallel array to columns: type name per column
   show_types      = nil, -- nil = use config default; true/false = user toggled
   fullscreen_tab  = nil, -- tabpage handle when dbout is fullscreen
-  split_dir       = nil, -- live placement; nil = fall back to config.split_dir
+  split_dir       = {},  -- live placement, keyed by connection type; falls back to config
   split_size      = {},  -- last size the user left dbout at, per axis
+  render_mode     = "grid", -- how the current result is drawn: grid | json | text
+  forced_mode     = nil, -- mode pinned by :DbliteOutput; nil/"auto" = decide per result
+  dbout_filetype  = nil, -- filetype dbout currently carries, to avoid redundant resets
 }
+
+-- ── per-connection-type config ─────────────────────────────────────────────
+-- `config.types.<type>` overrides the top-level default for whichever
+-- connection is active. Redis and a SQL database want different result
+-- windows often enough that a single global setting is the wrong shape.
+
+local function conn_type()
+  return (state.active_conn and state.active_conn.type) or "_default"
+end
+
+-- A scalar setting, per-type block first.
+local function opt(key)
+  local per = (config.types or {})[conn_type()]
+  local v = per and per[key]
+  if v ~= nil then return v end
+  return config[key]
+end
+
+-- `output` is merged rather than replaced, so a per-type block can pin one
+-- command without restating the whole table.
+local function output_cfg()
+  local base = config.output or {}
+  local per  = ((config.types or {})[conn_type()] or {}).output
+  if not per then return base end
+  return vim.tbl_deep_extend("force", vim.deepcopy(base), per)
+end
 
 local function merge_into(target, source)
   for k, v in pairs(source) do
@@ -116,6 +148,7 @@ local GLOBAL_ACTIONS = {
   { key = "inspect",      desc = "inspect current page",    fn = function() M.inspect() end },
   { key = "fullscreen",   desc = "toggle dbout fullscreen", fn = function() M.toggle_fullscreen() end },
   { key = "cycle_split",  desc = "flip dbout split",        fn = function() M.cycle_split() end },
+  { key = "cycle_output", desc = "cycle dbout rendering",   fn = function() M.cycle_output() end },
   { key = "connections",  desc = "edit connections file",   fn = function() M.edit_connections_file() end },
 }
 
@@ -175,6 +208,7 @@ end
 function M.setup(opts)
   if opts then merge_into(config, opts) end
   apply_global_keymaps()
+  devicons.setup()
 
   -- Neovim has no `redis` filetype of its own, so `*.redis` would attach
   -- nothing. Claim it here (without overriding a detection the user set up
@@ -209,7 +243,7 @@ end
 
 local function effective_max_col_width()
   if state.fullscreen_tab and vim.api.nvim_tabpage_is_valid(state.fullscreen_tab) then return 0 end
-  return config.max_col_width or 0
+  return opt("max_col_width") or 0
 end
 
 local function cell(value, width)
@@ -291,12 +325,79 @@ local function render_status_line(overrides, cancelled_items)
   return status, hl_marks
 end
 
+-- Setting 'filetype' fires every FileType autocmd and re-runs the syntax
+-- engine, so only touch it when the renderer actually changed dialects.
+local function set_dbout_filetype(bufnr, ft)
+  ft = ft or ""
+  if state.dbout_filetype == ft then return end
+  state.dbout_filetype = ft
+  vim.bo[bufnr].filetype = ft
+end
+
+-- Writes `lines` into dbout and re-applies the status-line highlights, whose
+-- columns are offset by whatever prefix the caller put in front of the status.
+local function paint(bufnr, lines, hl_marks, offset)
+  vim.bo[bufnr].modifiable = true
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+  vim.bo[bufnr].modifiable = false
+  vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
+  for _, m in ipairs(hl_marks or {}) do
+    vim.api.nvim_buf_set_extmark(bufnr, ns, 0, m.col + (offset or 0),
+      { end_col = m.end_col + (offset or 0), hl_group = m.hl })
+  end
+end
+
+-- The json/text renderers: one value, drawn whole.
+--
+-- There is nothing to paginate — the result is a single cell — so the status
+-- line reports the value's size instead of a page count. In json mode it is
+-- written as a `//` comment so that the buffer as a whole stays valid jsonc
+-- and highlights rather than showing one long error.
+local function render_document()
+  local bufnr = state.result_bufnr
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return end
+
+  local cfg   = output_cfg()
+  local col   = state.columns[1]
+  local row   = state.rows[1]
+  local value = (col and row) and row[col] or nil
+  local raw   = (value == nil or value == vim.NIL) and "" or tostring(value)
+
+  local body, ft
+  if state.render_mode == "json" then
+    body = json_fmt.format(raw, cfg.json_indent or 2) or raw
+    ft   = cfg.json_filetype or "jsonc"
+  else
+    body = raw
+    ft   = opt("filetype") or ""
+  end
+
+  local body_lines = vim.split(body, "\n", { plain = true })
+  local status, hl_marks = render_status_line({
+    pagination = string.format("(%s, %d line%s)",
+      state.render_mode, #body_lines, #body_lines == 1 and "" or "s"),
+    query_time = state.last_elapsed and string.format("%.3fs", state.last_elapsed) or nil,
+  })
+
+  local prefix = state.render_mode == "json" and "// " or ""
+  local lines  = { prefix .. status, "" }
+  vim.list_extend(lines, body_lines)
+
+  set_dbout_filetype(bufnr, ft)
+  paint(bufnr, lines, hl_marks, #prefix)
+end
+
 local function render_page()
   local bufnr = state.result_bufnr
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return end
 
+  if state.render_mode == "json" or state.render_mode == "text" then
+    return render_document()
+  end
+  set_dbout_filetype(bufnr, opt("filetype") or "")
+
   local total = #state.rows
-  local page_size = config.page_size or 100
+  local page_size = opt("page_size") or 100
   local total_pages = math.max(1, math.ceil(total / page_size))
   if state.page > total_pages then state.page = total_pages end
   if state.page < 1 then state.page = 1 end
@@ -313,18 +414,12 @@ local function render_page()
   table.insert(lines, "")
 
   if total == 0 then
-    vim.bo[bufnr].modifiable = true
-    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
-    vim.bo[bufnr].modifiable = false
-    vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
-    for _, m in ipairs(hl_marks) do
-      vim.api.nvim_buf_set_extmark(bufnr, ns, 0, m.col, { end_col = m.end_col, hl_group = m.hl })
-    end
+    paint(bufnr, lines, hl_marks)
     return
   end
 
   local types_visible = state.show_types
-  if types_visible == nil then types_visible = config.show_column_types end
+  if types_visible == nil then types_visible = opt("show_column_types") end
   local type_hl = (config.style and config.style.dbout and config.style.dbout.column_type_hl)
     or "DbliteColumnType"
 
@@ -373,14 +468,8 @@ local function render_page()
     table.insert(lines, table.concat(parts, " | "))
   end
 
-  vim.bo[bufnr].modifiable = true
-  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
-  vim.bo[bufnr].modifiable = false
+  paint(bufnr, lines, hl_marks)
 
-  vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
-  for _, m in ipairs(hl_marks) do
-    vim.api.nvim_buf_set_extmark(bufnr, ns, 0, m.col, { end_col = m.end_col, hl_group = m.hl })
-  end
   -- Highlight type annotations on the header line (line index 2 = third line)
   local header_row = 2
   for _, tm in ipairs(type_marks) do
@@ -392,6 +481,9 @@ end
 local function set_status(text)
   local bufnr = state.result_bufnr
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return end
+  -- A lone status line is never a document, so drop any json dialect the last
+  -- result left behind rather than highlighting "running..." as broken JSON.
+  set_dbout_filetype(bufnr, opt("filetype") or "")
   vim.bo[bufnr].modifiable = true
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { text })
   vim.bo[bufnr].modifiable = false
@@ -407,6 +499,7 @@ local function restore_history(idx)
   state.widths       = entry.widths
   state.raw_json     = entry.raw_json
   state.last_elapsed = entry.last_elapsed
+  state.render_mode  = entry.render_mode or "grid"
   state.page         = 1
   if entry.update_count then
     local msg = string.format("-- %d row(s) affected  (%.2fs)", entry.update_count, entry.last_elapsed)
@@ -423,13 +516,7 @@ local function set_cancelled_status(elapsed)
     { pagination = "cancelled", query_time = string.format("%.3fs", elapsed) },
     { pagination = true, query_time = true }
   )
-  vim.bo[bufnr].modifiable = true
-  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { status })
-  vim.bo[bufnr].modifiable = false
-  vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
-  for _, m in ipairs(hl_marks) do
-    vim.api.nvim_buf_set_extmark(bufnr, ns, 0, m.col, { end_col = m.end_col, hl_group = m.hl })
-  end
+  paint(bufnr, { status }, hl_marks)
 end
 
 local SPINNER = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
@@ -524,7 +611,8 @@ local function configure_result_buffer(bufnr)
   vim.bo[bufnr].buftype = "nofile"
   vim.bo[bufnr].bufhidden = "hide"
   vim.bo[bufnr].swapfile = false
-  vim.bo[bufnr].filetype = config.filetype or ""
+  state.dbout_filetype = nil
+  set_dbout_filetype(bufnr, opt("filetype") or "")
 
   local function map(lhs, fn, desc)
     if lhs and lhs ~= "" then
@@ -584,7 +672,7 @@ local function configure_result_buffer(bufnr)
 
   map(km.toggle_types or "d", function()
     local cur = state.show_types
-    if cur == nil then cur = config.show_column_types end
+    if cur == nil then cur = opt("show_column_types") end
     state.show_types = not cur
     render_page()
   end, "dblite: toggle column types")
@@ -596,6 +684,10 @@ local function configure_result_buffer(bufnr)
   map(km.cycle_split, function()
     M.cycle_split()
   end, "dblite: flip result window split")
+
+  map(km.cycle_output or "go", function()
+    M.cycle_output()
+  end, "dblite: cycle result rendering")
 
   local ek = (config.keymaps and config.keymaps.editor) or {}
   map(ek.fullscreen or "<leader>l", function()
@@ -634,8 +726,15 @@ local function load_ui_state()
   if raw == "" then return end
   local ok, data = pcall(vim.json.decode, raw)
   if not ok or type(data) ~= "table" then return end
+  -- Before 0.8 this was a single string for every connection. Keep reading
+  -- that shape, as the generic default it effectively was.
   if type(data.split_dir) == "string" and split_cmds[data.split_dir] then
-    state.split_dir = data.split_dir
+    state.split_dir = { _default = data.split_dir }
+  elseif type(data.split_dir) == "table" then
+    state.split_dir = {}
+    for t, dir in pairs(data.split_dir) do
+      if type(dir) == "string" and split_cmds[dir] then state.split_dir[t] = dir end
+    end
   end
   if type(data.split_size) == "table" then
     state.split_size = data.split_size
@@ -655,10 +754,19 @@ local function save_ui_state()
   return ok
 end
 
--- The placement in effect right now: session override, then config, then a
--- right-hand vertical split.
+-- The placement in effect right now, most specific first: what `:DbliteSplit`
+-- set for this connection type, then `config.types.<type>.split_dir`, then the
+-- generic session override, then `config.split_dir`, then a right-hand split.
+-- The per-type config outranks the generic session override on purpose: having
+-- moved dbout once with no connection active should not silently defeat a
+-- placement the user configured for Redis.
 local function current_split_dir()
-  local dir = state.split_dir or config.split_dir or "vertical"
+  local live = state.split_dir or {}
+  local dir = live[conn_type()]
+    or ((config.types or {})[conn_type()] or {}).split_dir
+    or live._default
+    or config.split_dir
+    or "vertical"
   return split_cmds[dir] and dir or "vertical"
 end
 
@@ -669,7 +777,7 @@ local function split_size_for(dir)
   if not axis then return nil end
   local remembered = state.split_size and state.split_size[axis]
   if remembered and remembered > 0 then return axis, remembered end
-  local configured = (config.split_size or {})[axis]
+  local configured = (opt("split_size") or {})[axis]
   if configured and configured > 0 then return axis, configured end
   return axis, nil
 end
@@ -928,6 +1036,14 @@ local function execute_core(query, script)
       state.page         = 1
       state.last_elapsed = elapsed
       state.raw_json     = result.stdout
+      -- Pick the renderer for this result. show_result does the same for a
+      -- watch's snapshot; without it here, a query typed in a buffer — the
+      -- common path — would always draw as a grid.
+      state.render_mode  = output.resolve(parsed, {
+        query  = q,
+        forced = state.forced_mode,
+        cfg    = output_cfg(),
+      })
 
       local max_hist = config.max_history or 20
       table.insert(state.history, {
@@ -935,6 +1051,7 @@ local function execute_core(query, script)
         column_types = state.column_types,
         rows         = state.rows,
         widths       = state.widths,
+        render_mode  = state.render_mode,
         raw_json     = state.raw_json,
         last_elapsed = state.last_elapsed,
         conn_name    = state.active_conn and state.active_conn.name or nil,
@@ -991,6 +1108,11 @@ function M.show_result(res, opts)
   state.page         = 1
   state.last_elapsed = res.elapsed
   state.raw_json     = res.json
+  state.render_mode  = output.resolve(res, {
+    query  = opts.query,
+    forced = state.forced_mode,
+    cfg    = output_cfg(),
+  })
 
   local max_hist = config.max_history or 20
   table.insert(state.history, {
@@ -998,6 +1120,7 @@ function M.show_result(res, opts)
     column_types = state.column_types,
     rows         = state.rows,
     widths       = state.widths,
+    render_mode  = state.render_mode,
     raw_json     = state.raw_json,
     last_elapsed = state.last_elapsed,
     conn_name    = opts.conn,
@@ -1735,7 +1858,8 @@ function M.set_split_dir(dir)
     and #vim.fn.win_findbuf(state.result_bufnr) > 0
 
   if was_open then hide_dbout_windows() end
-  state.split_dir = dir
+  state.split_dir = state.split_dir or {}
+  state.split_dir[conn_type()] = dir
   save_ui_state()
   if was_open then
     open_dbout_win(state.result_bufnr)
@@ -1752,6 +1876,56 @@ end
 function M.cycle_split()
   local horizontal = split_axis[current_split_dir()] == "height"
   M.set_split_dir(horizontal and "right" or "below")
+end
+
+-- :DbliteOutput <auto|grid|json|text> — redraw the current result with a
+-- different renderer, and keep using it for the results that follow.
+--
+-- The pin persists rather than lasting one query: having asked for JSON, a
+-- second `JSON.GET` should not silently revert to a grid. `auto` hands the
+-- decision back to detection.
+function M.set_output_mode(mode)
+  mode = vim.trim(mode or "")
+  if mode == "" then
+    vim.notify(string.format("dblite: output is %s (showing %s)",
+      state.forced_mode or "auto", state.render_mode), vim.log.levels.INFO)
+    return
+  end
+  if not output.is_mode(mode) then
+    vim.notify("dblite: output must be one of " .. table.concat(output.MODES, ", "),
+      vim.log.levels.ERROR)
+    return
+  end
+
+  state.forced_mode = mode ~= "auto" and mode or nil
+
+  local entry = state.history[state.history_idx]
+  state.render_mode = output.resolve({
+    columns      = state.columns,
+    column_types = state.column_types,
+    rows         = state.rows,
+  }, {
+    query  = entry and entry.query_text,
+    forced = state.forced_mode,
+    cfg    = output_cfg(),
+  })
+
+  if state.result_bufnr and vim.api.nvim_buf_is_valid(state.result_bufnr) then
+    render_page()
+  end
+  vim.notify(string.format("dblite: output → %s%s", mode,
+    mode == "auto" and (" (" .. state.render_mode .. ")") or ""), vim.log.levels.INFO)
+end
+
+-- Cycle through every renderer including `auto`, so one key both explores the
+-- alternatives and gets back to letting dblite choose.
+function M.cycle_output()
+  local current = state.forced_mode or "auto"
+  local idx = 1
+  for i, mode in ipairs(output.MODES) do
+    if mode == current then idx = i; break end
+  end
+  M.set_output_mode(output.MODES[(idx % #output.MODES) + 1])
 end
 
 function M.toggle_fullscreen()
@@ -1783,6 +1957,15 @@ end, {
   complete = function(arg_lead)
     return vim.tbl_filter(function(k) return k:sub(1, #arg_lead) == arg_lead end,
       { "right", "left", "below", "above", "tab" })
+  end,
+})
+
+vim.api.nvim_create_user_command("DbliteOutput", function(opts)
+  M.set_output_mode(opts.args)
+end, {
+  nargs    = "?",
+  complete = function(arg_lead)
+    return vim.tbl_filter(function(k) return k:sub(1, #arg_lead) == arg_lead end, output.MODES)
   end,
 })
 
@@ -2361,6 +2544,7 @@ do
     binds         = function() M.edit_binds() end,
     load          = function() M.load() end,
     split         = function(a) M.set_split_dir(a[2]) end,
+    output        = function(a) M.set_output_mode(a[2]) end,
   }
 
   local function complete(arg_lead, cmd_line)
@@ -2368,7 +2552,7 @@ do
     local n = #tokens
     if n == 2 then
       return vim.tbl_filter(function(k) return k:sub(1, #arg_lead) == arg_lead end,
-        { "run", "watch", "jobs", "toggle", "conn", "build", "inspect", "export", "binds", "load", "split" })
+        { "run", "watch", "jobs", "toggle", "conn", "build", "inspect", "export", "binds", "load", "split", "output" })
     elseif n == 3 then
       local sub = tokens[2]
       local opts = {
@@ -2381,6 +2565,7 @@ do
         inspect = { "json", "table", "csv" },
         export  = { "csv", "json" },
         split   = { "right", "left", "below", "above", "tab" },
+        output  = output.MODES,
       }
       local choices = opts[sub] or {}
       return vim.tbl_filter(function(k) return k:sub(1, #arg_lead) == arg_lead end, choices)

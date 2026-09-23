@@ -431,9 +431,13 @@ cell, ready to expand with |dblite-inspect|.
 JSON							*dblite-redis-json*
 
 A value that is a JSON document is tagged `json` in the column types (see
-|dblite-column-types|). |dblite-inspect| decodes JSON-inside-a-string
-recursively, so nested payloads unwrap into real structure. `JSON.GET` uses the
-same path.
+|dblite-column-types|), and a reply that is nothing but one such value is
+pretty-printed into dbout rather than squeezed into a cell — `JSON.GET` and a
+`GET` of a serialized payload both land in the json view. See
+|dblite-dbout-render|.
+
+|dblite-inspect| decodes JSON-inside-a-string recursively, so nested payloads
+unwrap into real structure.
 
 A value holding JSONL expands to one row per record, so paging and export
 operate on records instead of one oversized cell:
@@ -549,10 +553,28 @@ connection; lower the cap or set `enabled = false` on a very large instance.
 FILETYPE						*dblite-redis-filetype*
 
 Neovim has no `redis` filetype of its own, so |dblite-config| `setup()` claims
-`*.redis` for one (unless something already detects it). Redis commands also
-run fine in a `.sql` buffer — dblite routes on the active connection's type,
-not the buffer's filetype — but SQL highlighting and SQL completion will look
-wrong there, so a `.redis` file is the better home.
+`*.redis` for one (unless something already detects it) and dblite ships the
+syntax and ftplugin to go with it:
+
+- Comments are `#`, which is what Redis scripts and |dblite-redis-script| use,
+  rather than SQL's `--`. 'commentstring' is set accordingly, so |gc| and
+  friends comment the right way.
+- 'iskeyword' includes `.` and `:`, so `JSON.GET` is one word and
+  `user:1042:profile` is one word. `w`, `*`, `yiw` and completion all stop
+  where you would expect rather than at every separator.
+- Highlighting separates the command from its flags, keys, quoted arguments,
+  JSONPath expressions and numbers. Only recognised flags are highlighted, so
+  a mistyped one stays plain — which is the point.
+- 'formatoptions' loses `t` and `c`: statements are newline-delimited, so a
+  wrapped line would silently become two commands.
+
+If nvim-web-devicons is installed, dblite registers the Redis logo for both
+the `redis` extension and filetype. An icon already supplied by the user or
+another plugin is left unchanged.
+
+Redis commands also run fine in a `.sql` buffer — dblite routes on the active
+connection's type, not the buffer's filetype — but SQL highlighting and SQL
+completion will look wrong there, so a `.redis` file is the better home.
 
 LIMITATIONS						*dblite-redis-limits*
 
@@ -598,6 +620,45 @@ resized it to by hand. The sized axis is pinned ('winfixwidth' or
 right-hand and a below split, which is useful when switching between long JSON
 values and wide result grids.
 
+RENDERING						*dblite-dbout-render*
+
+The grid is right for a tabular reply and wrong for a single document.
+`JSON.GET` returns one value; as a one-cell table truncated at `max_col_width`
+almost none of it is visible. dbout therefore picks a renderer per result:
+
+	grid	the paginated table — every tabular reply
+	json	the value pretty-printed, with the status line as a `//`
+		comment so the buffer stays valid `jsonc` and highlights
+	text	the value verbatim and untruncated, no cell escaping
+
+With `output.mode = 'auto'` (the default) the choice comes from the reply
+itself: a result that is one row and one column whose column type is `json`
+(see |dblite-column-types|) renders as json, a lone multi-line value renders
+as text, and everything else stays a grid. The backend tags a column `json`
+only when every value in it is a JSON document, so the tag is worth switching
+renderers on.
+
+							*dblite-output-commands*
+Pin individual commands when detection is not what you want. Keys match the
+statement's first word, case-insensitively: >lua
+	output = {
+	  commands = {
+	    ['JSON.GET'] = 'json',
+	    GET          = 'text',   -- a blob you would rather see raw
+	    INFO         = 'grid',
+	  },
+	}
+<
+|:DbliteOutput| changes the renderer for the result on screen and keeps using
+it for the results that follow, so a second `JSON.GET` does not revert to a
+grid. `:DbliteOutput auto` hands the decision back to detection. `go` inside
+dbout cycles auto → grid → json → text.
+
+Paging does not apply in json or text mode — the result is a single value —
+so the status line reports its line count instead of a page number.
+|dblite-inspect| and |:DbliteExport| are unaffected: both work from the raw
+reply, whatever dbout is showing.
+
 The first line is a status line whose sections are configurable via
 `style.dbout.sections`. Available items: "history", "pagination",
 "query_time", "connection", "binds_file".
@@ -611,6 +672,8 @@ Default dbout keymaps (configurable via `keymaps.dbout`, see |dblite-config|):
 	`K`		Hover: show the query that produced *dblite_K*
 			this result
 	`d`		Toggle column type annotations	    *dblite_d*
+	`go`		Cycle rendering: auto/grid/json/    *dblite_go*
+			text (|dblite-dbout-render|)
 	`gi`		Inspect current page (untruncated)  *dblite_gi*
 	`<leader>l`	Toggle dbout fullscreen		    *dblite_fullscreen*
 	`<C-c>`		Cancel the in-flight query	    *dblite_CTRL-C*
@@ -766,6 +829,8 @@ Unified entry point ~
 :Dblite toggle dbout		Toggle the result window.
 :Dblite toggle jobs		Toggle the activity panel.
 :Dblite split <dir>		Move the result window (|:DbliteSplit|).
+:Dblite output <mode>		Change how results are drawn
+				(|:DbliteOutput|).
 :Dblite conn add [uri]		Add a connection.
 :Dblite conn list		List connections.
 :Dblite conn use <name>		Set the active connection.
@@ -795,6 +860,14 @@ Individual commands ~
 				the current placement. The choice is
 				remembered across sessions.
 				See |dblite-dbout-split|.
+							*:DbliteOutput*
+:DbliteOutput [mode]		Change how the result window draws results.
+				`mode` is one of auto, grid, json, text. With
+				no argument, report the current setting and
+				what it resolved to. It stays in effect for
+				the rest of the session, or until set back to
+				`auto`.
+				See |dblite-dbout-render|.
 							*:DbliteRunBulk*
 :DbliteRunBulk <fmt> [path]	Run the current query as a background bulk
 				export (csv|json). Prompts for a path when
@@ -867,6 +940,7 @@ Use global maps for cross-cutting actions you want available everywhere:
   `keymaps.global.inspect`         inspect the current page untruncated
   `keymaps.global.fullscreen`      toggle dbout fullscreen
   `keymaps.global.cycle_split`     flip dbout between right and below
+  `keymaps.global.cycle_output`    cycle dbout between grid, json and text
   `keymaps.global.connections`     open the connections JSON file
 
 Editor maps are buffer-local (set only in `filetypes` buffers), so they never
@@ -878,6 +952,7 @@ dbout buffer ~  (active only inside the result buffer)
 	`H`		previous page		`keymaps.dbout.prev`
 	`[`		previous history	`keymaps.dbout.history_prev`
 	`]`		next history		`keymaps.dbout.history_next`
+	`go`		cycle rendering		`keymaps.dbout.cycle_output`
 	`K`		hover query		`keymaps.dbout.hover_query`
 	`d`		toggle column types	`keymaps.dbout.toggle_types`
 	`gi`		inspect page		`keymaps.dbout.inspect`
@@ -955,6 +1030,16 @@ defaults, so you only need to specify what you change. Defaults: >lua
 	  on_attach      = nil,           -- function(bufnr): custom per-SQL-buffer
 	                                  --   setup (buffer-local keybinds, etc.)
 	  filetype       = '',            -- dbout filetype ('' = no highlighting)
+	  output = {                      -- how results are drawn; see
+	                                  --   |dblite-dbout-render|
+	    mode          = 'auto',       -- auto|grid|json|text
+	    json_indent   = 2,            -- spaces per level in the json view
+	    json_filetype = 'jsonc',      -- filetype for the json view
+	    commands      = {},           -- per-command pins, e.g.
+	                                  --   { ['JSON.GET'] = 'json' }
+	  },
+	  types = {},                     -- per-connection-type overrides; see
+	                                  --   |dblite-config-types|
 	  flash_timeout  = 2000,          -- ms to hold query flash; 0 = until done
 	  json_view      = 'tab',         -- inspect window: tab|vertical|
 	                                  --   horizontal|float
@@ -998,6 +1083,8 @@ defaults, so you only need to specify what you change. Defaults: >lua
 	      toggle_binds  = '',
 	      inspect       = '',
 	      fullscreen    = '',
+	      cycle_split   = '',
+	      cycle_output  = '',
 	      connections   = '',
 	    },
 	    dbout = {
@@ -1009,6 +1096,7 @@ defaults, so you only need to specify what you change. Defaults: >lua
 	      history_next = ']',
 	      hover_query  = 'K',
 	      toggle_types = 'd',
+	      cycle_output = 'go',
 	      toggle_dbout = '',
 	    },
 	    editor = {  -- buffer-local (SQL buffers only); '' = disabled
@@ -1059,6 +1147,38 @@ defaults, so you only need to specify what you change. Defaults: >lua
 	  },
 	})
 <
+PER-CONNECTION-TYPE SETTINGS				*dblite-config-types*
+
+Redis and a SQL database want different result windows often enough that one
+global setting cannot serve both: a Redis reply is frequently a single
+document, which reads well in a tall right-hand pane, while a result grid
+reads well in a short wide one. `types` overrides the top-level defaults for
+whichever connection is active: >lua
+	require('dblite').setup({
+	  split_dir = 'below',            -- what SQL connections get
+	  types = {
+	    redis = {
+	      split_dir  = 'right',
+	      split_size = { width = 90 },
+	      output     = { commands = { ['JSON.GET'] = 'json' } },
+	    },
+	  },
+	})
+<
+Overridable keys: `split_dir`, `split_size`, `filetype`, `page_size`,
+`max_col_width`, `show_column_types` and `output`. Anything absent from a
+type's block falls through to the top-level default. `output` is merged rather
+than replaced, so a per-type block can pin one command without restating the
+whole table.
+
+Type names are the connection types: `oracle`, `sqlserver`, `sqlite`, `redis`.
+
+|:DbliteSplit| is likewise remembered per type. Moving dbout while a Redis
+connection is active does not move it for your Oracle connections, and the
+placements persist separately across sessions. Precedence, highest first: what
+|:DbliteSplit| set for this type, then `types.<type>.split_dir`, then a
+|:DbliteSplit| made with no connection active, then `split_dir`.
+
 ==============================================================================
 18. LUA API						*dblite-api*
 

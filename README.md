@@ -171,6 +171,7 @@ Redis needs only a host — auth is optional, and the database is an index (defa
 | `:Dblite run at` | Run the statement under the cursor (treesitter-aware) |
 | `:Dblite toggle dbout` | Show/hide the result window (query keeps running if in-flight) |
 | `:DbliteSplit <dir>` | Move the result window: `right`, `left`, `below`, `above`, `tab` |
+| `:DbliteOutput <mode>` | How results are drawn: `auto`, `grid`, `json`, `text` |
 | `:Dblite inspect [json\|table\|csv]` | Open the current page untruncated in a scratch window |
 | `:Dblite export <csv\|json> [path]` | Write the **entire** result set to a file |
 | `:Dblite run bulk <csv\|json> [path]` | Run the current query **in the background**, streaming the full result straight to a file |
@@ -189,7 +190,7 @@ Trailing semicolons are stripped automatically. The legacy `:DbliteRun`, `:Dblit
 | `L` / `H` | Next / previous page | `[` / `]` | Previous / next result in history |
 | `K` | Hover the query that produced this result | `d` | Toggle column type annotations |
 | `gi` | Inspect current page (untruncated) | `<leader>l` | Toggle dbout fullscreen |
-| `<C-c>` | Cancel in-flight query | | |
+| `go` | Cycle rendering: auto / grid / json / text | `<C-c>` | Cancel in-flight query |
 
 `<C-c>` also cancels from any buffer while a query runs — dblite sets it globally for the duration and restores your mapping afterward.
 
@@ -248,7 +249,7 @@ Use `SCAN` itself if you want the raw cursor semantics; it is passed through unt
 
 Nested replies (`XRANGE`, `CLUSTER SLOTS`) keep their shape as JSON inside the cell, ready for `gi`.
 
-**JSON.** A value that is a JSON document is tagged `json` in the column types — press `d` to see the tag, `gi` to expand it. The inspect view decodes JSON-inside-a-string recursively, so nested payloads unwrap into real structure rather than a wall of escapes. `JSON.GET` rides the same path.
+**JSON.** A value that is a JSON document is tagged `json` in the column types — press `d` to see the tag. A reply that is *nothing but* one such value skips the grid entirely and is pretty-printed into dbout, so `JSON.GET` and a `GET` of a serialized payload both arrive readable rather than truncated into a cell. The inspect view (`gi`) decodes JSON-inside-a-string recursively, so nested payloads unwrap into real structure rather than a wall of escapes.
 
 A value holding **JSONL** expands to one row per record, so paging and export operate on records instead of one giant cell:
 
@@ -331,7 +332,48 @@ redis = { completion = { enabled = true, max_keys = 5000 } }
 
 `max_keys` caps how many keys are pulled in for completion (`0` = no cap). Note it's a `SCAN`, so it costs a keyspace walk on first use — lower it on a huge instance, or set `enabled = false`.
 
+**The `.redis` filetype.** Neovim ships none, so dblite provides it: `#` comments (not SQL's `--`), highlighting that separates the command from its flags, keys, quoted arguments and JSONPath expressions, and an `iskeyword` that treats `JSON.GET` and `user:1042:profile` as single words — so `w`, `*` and `yiw` stop where you'd expect. Only recognised flags highlight, which makes a typo visible. If `nvim-web-devicons` is installed, dblite also registers its Redis icon for the extension and filetype without replacing a user override.
+
 **Not supported yet:** `redis+cluster://` and `redis+sentinel://`. Bind parameters are a SQL feature and are switched off for Redis — otherwise every colon-namespaced key (`queue:jobs`) would read as a missing `:jobs` parameter. `:Dblite load` is SQL-only.
+
+</details>
+
+<details>
+<summary><b>How results are drawn</b></summary>
+
+A grid is right for a tabular reply and wrong for a single document. `JSON.GET` returns one value; as a one-cell table truncated at `max_col_width` you see almost none of it. So dbout picks a renderer per result:
+
+```
+JSON.GET user:1042:profile $
+```
+```jsonc
+// ◀ 3/7 ▶  (json, 9 lines)  —  0.012s  ·  cache
+
+{
+  "id": 1042,
+  "email": "…",
+  "flags": [
+    "beta",
+    "staff"
+  ]
+}
+```
+
+With the default `output.mode = 'auto'`, a reply that is one row and one column typed `json` renders as JSON, a lone multi-line value renders as raw text, and everything else stays a grid. The backend tags a column `json` only when every value in it is a document, so the tag is worth switching renderers on.
+
+Pin commands where detection isn't what you want — keys match the first word, case-insensitively:
+
+```lua
+output = {
+  commands = {
+    ['JSON.GET'] = 'json',
+    GET          = 'text',   -- a blob you'd rather see raw
+    INFO         = 'grid',
+  },
+}
+```
+
+`:DbliteOutput json|text|grid|auto` switches the result on screen and keeps using that renderer for the ones that follow, so a second `JSON.GET` doesn't snap back to a grid; `auto` hands the choice back to detection. `go` inside dbout cycles through all four. Inspect and export are unaffected — both work from the raw reply.
 
 </details>
 
@@ -354,6 +396,30 @@ If dbout is open it moves immediately and re-renders at the new width; otherwise
 ```lua
 keymaps = { editor = { cycle_split = '<leader>ds' } }
 ```
+
+The placement is remembered **per connection type**, so moving dbout on a Redis connection doesn't move it for your Oracle ones.
+
+</details>
+
+<details>
+<summary><b>Per-connection-type settings</b></summary>
+
+Redis and a SQL database want different windows often enough that one global setting can't serve both — a single document reads well in a tall right-hand pane, a result grid in a short wide one. `types` overrides the top-level defaults for whichever connection is active:
+
+```lua
+require('dblite').setup({
+  split_dir = 'below',              -- what SQL connections get
+  types = {
+    redis = {
+      split_dir  = 'right',
+      split_size = { width = 90 },
+      output     = { commands = { ['JSON.GET'] = 'json' } },
+    },
+  },
+})
+```
+
+Overridable: `split_dir`, `split_size`, `filetype`, `page_size`, `max_col_width`, `show_column_types`, `output`. Anything absent falls through to the top-level default, and `output` is merged rather than replaced, so a type block can pin one command without restating the table. Type names are the connection types: `oracle`, `sqlserver`, `sqlite`, `redis`.
 
 </details>
 
@@ -717,6 +783,8 @@ db.close_panel()           -- close the panel
 db.is_panel_open()         -- true/false
 db.set_split_dir(dir)      -- move dbout: 'right'|'left'|'below'|'above'|'tab'
 db.cycle_split()           -- flip dbout between right and below
+db.set_output_mode(mode)   -- draw results as 'auto'|'grid'|'json'|'text'
+db.cycle_output()          -- cycle dbout through all four renderers
 ```
 
 </details>
@@ -759,6 +827,14 @@ require('dblite').setup({
   },
   on_attach      = nil,           -- function(bufnr) run per SQL buffer for custom buffer-local keybinds
   filetype       = '',            -- filetype for the result buffer ('' = no highlighting)
+  output = {                      -- how results are drawn
+    mode          = 'auto',       -- 'auto' | 'grid' | 'json' | 'text'
+    json_indent   = 2,            -- spaces per level in the json view
+    json_filetype = 'jsonc',      -- filetype for the json view
+    commands      = {},           -- per-command pins, e.g. { ['JSON.GET'] = 'json' }
+  },
+  types          = {},            -- per-connection-type overrides, e.g.
+                                  --   { redis = { split_dir = 'right' } }
   flash_timeout  = 2000,          -- ms to hold the query highlight; 0 = hold until results
   json_view      = 'tab',         -- where inspect opens: 'tab' | 'vertical' | 'horizontal' | 'float'
   load_view      = 'tab',         -- where the CSV-load preview opens: 'tab' | 'vertical' | 'horizontal' | 'float'
@@ -840,7 +916,7 @@ require('dblite').setup({
     dbout = {
       next = 'L', prev = 'H', cancel = '<C-c>', inspect = 'gi',
       history_prev = '[', history_next = ']', hover_query = 'K', toggle_types = 'd',
-      toggle_dbout = '',
+      cycle_output = 'go', toggle_dbout = '',
     },
     editor = {  -- buffer-local, set only in `filetypes` buffers. '' = disabled.
       run          = '',          -- run the whole buffer
