@@ -624,6 +624,29 @@ resized it to by hand. The sized axis is pinned ('winfixwidth' or
 right-hand and a below split, which is useful when switching between long JSON
 values and wide result grids.
 
+SIZING							*dblite-dbout-size*
+
+`split_size.width` and `split_size.height` each take either a cell count or a
+fraction of the screen: >lua
+	split_size = { width = 0.4, height = 20 }
+<
+	0 or nil	let Vim decide
+	0 < value < 1	that fraction of the screen — 0.5 is half the
+			terminal, whatever width it happens to be
+	value >= 1	that many cells
+
+Every value is clamped to leave the editor a usable window. A width wider than
+the screen is not an error Vim reports: it honours the request and squeezes the
+other window down to 'winwidth', which reads as a layout bug rather than as a
+configuration mistake. The clamp reserves 'winwidth' columns (or 'winheight'
+rows) plus the separator, and when the screen is too small to split at all the
+size is dropped rather than forced.
+
+A size you resize dbout to by hand is remembered as a fraction as well, so it
+stays proportional across a terminal resize. Remembering 60 columns pins dbout
+to 60 on every screen — most of an 80-column terminal, a third of a wide one —
+and a size measured in one session would be wrong in the next.
+
 RENDERING						*dblite-dbout-render*
 
 The grid is right for a tabular reply and wrong for a single document.
@@ -1019,7 +1042,8 @@ Call `require('dblite').setup(opts)`. Options are deep-merged over the
 defaults, so you only need to specify what you change. Defaults: >lua
 	require('dblite').setup({
 	  split_dir      = 'horizontal',  -- right|left|below|above|tab
-	  split_size     = { width = 80, height = 20 },
+	  split_size     = { width = 0.4, height = 20 },  -- cells, or a
+	                   -- fraction of the screen (|dblite-dbout-size|)
 	  page_size      = 100,           -- rows per page in dbout
 	  max_rows       = 10000,         -- hard cap on rows returned
 	  max_col_width  = 50,            -- truncate cells wider than this; 0=off

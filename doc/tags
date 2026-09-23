@@ -30,6 +30,7 @@ dblite-config-types	dblite.txt	/*dblite-config-types*
 dblite-connections	dblite.txt	/*dblite-connections*
 dblite-dbout	dblite.txt	/*dblite-dbout*
 dblite-dbout-render	dblite.txt	/*dblite-dbout-render*
+dblite-dbout-size	dblite.txt	/*dblite-dbout-size*
 dblite-dbout-split	dblite.txt	/*dblite-dbout-split*
 dblite-highlights	dblite.txt	/*dblite-highlights*
 dblite-history	dblite.txt	/*dblite-history*

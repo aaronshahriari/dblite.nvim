@@ -391,6 +391,8 @@ output = {
 
 `right`/`left`/`below`/`above` are the unambiguous names; the older `vertical` (= right) and `horizontal` (= below) still work.
 
+**Sizing.** `split_size.width` and `.height` take either a cell count or a **fraction of the screen** — `0.5` is half the terminal, whatever width it happens to be. Values are clamped so the editor always keeps a usable window: a `width` wider than the screen would otherwise squeeze the editor down to `'winwidth'`, which looks like a layout bug rather than a configuration mistake. A size you drag to by hand is remembered as a fraction too, so it stays proportional when you resize the terminal instead of pinning dbout to a number measured on a different screen.
+
 If dbout is open it moves immediately and re-renders at the new width; otherwise the placement applies next time it opens. Either way it is **remembered** — for the next toggle and the next session, along with any size you dragged it to. `:Dblite split right` is the same command, and `cycle_split` (unmapped by default) flips between right and below:
 
 ```lua
@@ -813,7 +815,10 @@ require('dblite').setup({
   split_dir      = 'horizontal',  -- 'right' | 'left' | 'below' | 'above' | 'tab'
                                   -- ('vertical' = right, 'horizontal' = below)
                                   -- change live with :DbliteSplit; it is remembered
-  split_size     = { width = 80, height = 20 },  -- defaults; a size you drag to is remembered
+  split_size     = { width = 0.4, height = 20 }, -- whole number = cells, decimal < 1 = fraction
+                                                 -- of the screen; clamped to keep the editor
+                                                 -- usable. A size you drag to is remembered as
+                                                 -- a fraction, so it survives a terminal resize.
   page_size      = 100,           -- rows per page in the result buffer
   max_rows       = 10000,         -- hard cap on rows returned
   max_col_width  = 50,            -- truncate cells wider than this; 0 = no limit

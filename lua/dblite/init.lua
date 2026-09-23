@@ -8,6 +8,7 @@ local jobs         = require("dblite.jobs")
 local binds_mod    = require("dblite.binds")
 local inline       = require("dblite.inline")
 local watch        = require("dblite.watch")
+local size         = require("dblite.size")
 local output       = require("dblite.output")
 local json_fmt     = require("dblite.json")
 local devicons     = require("dblite.devicons")
@@ -770,28 +771,40 @@ local function current_split_dir()
   return split_cmds[dir] and dir or "vertical"
 end
 
--- Size for a placement: what the user last dragged it to, else the configured
--- default. 0 or nil means "let nvim decide".
+-- Size for a placement: what the user last left it at, else the configured
+-- default. Either may be an absolute cell count or a fraction of the screen,
+-- and both are clamped so the editor stays usable — see dblite.size.
 local function split_size_for(dir)
   local axis = split_axis[dir]
   if not axis then return nil end
-  local remembered = state.split_size and state.split_size[axis]
-  if remembered and remembered > 0 then return axis, remembered end
-  local configured = (opt("split_size") or {})[axis]
-  if configured and configured > 0 then return axis, configured end
-  return axis, nil
+  local total = size.total(axis)
+
+  local remembered = (state.split_size or {})[axis]
+  local resolved   = size.resolve(axis, remembered, total)
+  if resolved then return axis, resolved end
+
+  return axis, size.resolve(axis, (opt("split_size") or {})[axis], total)
 end
 
 -- Captures the size of a dbout window before it goes away, so bringing it back
--- restores the size rather than snapping to the default.
+-- restores it rather than snapping to the default.
+--
+-- Stored as a fraction of the screen, not as cells: a remembered 60 columns is
+-- wrong on every screen but the one it was measured on, and a terminal that
+-- changed size between sessions would otherwise pin dbout to the old number.
 local function remember_dbout_size(winnr)
   if not winnr or not vim.api.nvim_win_is_valid(winnr) then return end
   local axis = split_axis[current_split_dir()]
   if not axis then return end
-  state.split_size = state.split_size or {}
-  state.split_size[axis] = axis == "width"
+
+  local cells = axis == "width"
     and vim.api.nvim_win_get_width(winnr)
     or  vim.api.nvim_win_get_height(winnr)
+  local fraction = size.as_fraction(axis, cells)
+  if not fraction then return end
+
+  state.split_size = state.split_size or {}
+  state.split_size[axis] = fraction
 end
 
 -- Hides every window showing dbout, remembering the size on the way out.

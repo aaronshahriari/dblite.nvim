@@ -92,6 +92,11 @@ f:close()
 -- The placement is remembered per connection type; with no connection active
 -- it lands under the generic `_default` key.
 eq(saved.split_dir._default, "right", "split_dir persisted")
-eq(saved.split_size.width, 61, "dragged width persisted")
+-- Persisted as a fraction of the screen, not as cells: 61 of 200 columns is
+-- 0.305, which resolves back to 61 here and to something proportional on a
+-- terminal of a different width.
+eq(saved.split_size.width, 0.305, "dragged width persisted as a screen fraction")
+eq(require("dblite.size").resolve("width", saved.split_size.width, 200), 61,
+  "the persisted fraction resolves back to the dragged width")
 
 print("split_spec: ok")
