@@ -51,6 +51,10 @@ Neovim never blocks while a query is in flight; you can cancel with |CTRL-C|.
   |dblite-installation|) or built with |:DbliteBuild|.
 - Optional: `jq` on PATH for pretty-printed JSON in |dblite-inspect|.
 - Optional: blink.cmp for |dblite-completion|.
+- Optional: telescope.nvim for the connection picker (|dblite-panel|).
+- Optional: nvim-web-devicons for the Redis icon on `.redis` files. dblite
+  registers the icon, but does not bundle the plugin — without it the
+  filetype simply has no icon, which is not an error. See |dblite-redis-filetype|.
 
 ==============================================================================
 3. INSTALLATION						*dblite-installation*

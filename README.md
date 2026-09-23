@@ -57,7 +57,7 @@ The database work runs in a native binary (GraalVM), so there's **no JVM at runt
 ## Requirements
 
 - Neovim 0.11+
-- Optional: [`jq`](https://jqlang.github.io/jq/) (prettier JSON), [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim) (picker), [blink.cmp](https://github.com/Saghen/blink.cmp) (completion)
+- Optional: [`jq`](https://jqlang.github.io/jq/) (prettier JSON), [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim) (picker), [blink.cmp](https://github.com/Saghen/blink.cmp) (completion), [nvim-web-devicons](https://github.com/nvim-tree/nvim-web-devicons) (the Redis icon on `.redis` files — dblite registers it, but the plugin itself is yours to install)
 - Only if building from source (no prebuilt binary for your platform): GraalVM `native-image`
 
 ## Installation
