@@ -73,7 +73,8 @@ local state = {
   show_types      = nil, -- nil = use config default; true/false = user toggled
   fullscreen_tab  = nil, -- tabpage handle when dbout is fullscreen
   split_dir       = {},  -- live placement, keyed by connection type; falls back to config
-  split_size      = {},  -- last size the user left dbout at, per axis
+  split_size      = {},  -- size the user resized dbout to this session, per axis
+  applied_size    = {},  -- size dblite itself last set, to tell the two apart
   render_mode     = "grid", -- how the current result is drawn: grid | json | text
   forced_mode     = nil, -- mode pinned by :DbliteOutput; nil/"auto" = decide per result
   dbout_filetype  = nil, -- filetype dbout currently carries, to avoid redundant resets
@@ -737,19 +738,21 @@ local function load_ui_state()
       if type(dir) == "string" and split_cmds[dir] then state.split_dir[t] = dir end
     end
   end
-  if type(data.split_size) == "table" then
-    state.split_size = data.split_size
-  end
+  -- `split_size` was persisted before 0.8.1 and is deliberately not read back.
+  -- A size on disk outranked `split_size` in the user's config, and since it
+  -- was written on every toggle rather than only on a real resize, one toggle
+  -- was enough to freeze the configured value permanently. Size memory is now
+  -- session-scoped: a resize survives toggling dbout away and back, and the
+  -- config is authoritative again on the next start.
 end
 
 local function save_ui_state()
   local ok = pcall(function()
     vim.fn.mkdir(vim.fn.fnamemodify(ui_state_path, ":h"), "p")
     local f = assert(io.open(ui_state_path, "w"))
-    f:write(vim.json.encode({
-      split_dir  = state.split_dir,
-      split_size = state.split_size,
-    }))
+    -- Only the placement is persisted. See load_ui_state for why the size is
+    -- not: a size on disk silently outranked the user's own config.
+    f:write(vim.json.encode({ split_dir = state.split_dir }))
     f:close()
   end)
   return ok
@@ -771,16 +774,20 @@ local function current_split_dir()
   return split_cmds[dir] and dir or "vertical"
 end
 
--- Size for a placement: what the user last left it at, else the configured
--- default. Either may be an absolute cell count or a fraction of the screen,
--- and both are clamped so the editor stays usable — see dblite.size.
+-- Size for a placement: a size the user resized dbout to during this session,
+-- otherwise the configured default. Either may be an absolute cell count or a
+-- fraction of the screen, and both are clamped so the editor stays usable —
+-- see dblite.size.
+--
+-- The configured value has to win whenever the user has not overridden it by
+-- hand, or editing `split_size` does nothing.
 local function split_size_for(dir)
   local axis = split_axis[dir]
   if not axis then return nil end
   local total = size.total(axis)
 
-  local remembered = (state.split_size or {})[axis]
-  local resolved   = size.resolve(axis, remembered, total)
+  local resized  = (state.split_size or {})[axis]
+  local resolved = size.resolve(axis, resized, total)
   if resolved then return axis, resolved end
 
   return axis, size.resolve(axis, (opt("split_size") or {})[axis], total)
@@ -800,6 +807,14 @@ local function remember_dbout_size(winnr)
   local cells = axis == "width"
     and vim.api.nvim_win_get_width(winnr)
     or  vim.api.nvim_win_get_height(winnr)
+
+  -- Only a size the user changed is worth remembering. Storing back the size
+  -- we applied ourselves would snapshot the configured default into session
+  -- state on the very first toggle, and then outrank the config it came from —
+  -- so editing `split_size` would appear to do nothing at all.
+  local applied = (state.applied_size or {})[axis]
+  if applied and cells == applied then return end
+
   local fraction = size.as_fraction(axis, cells)
   if not fraction then return end
 
@@ -822,13 +837,23 @@ end
 -- 'winwidth'/'winheight' quietly claw columns back from dbout the moment the
 -- cursor returns to a now-narrow editor window, so a restored size would drift.
 local function size_dbout_win(dir)
-  local axis, size = split_size_for(dir)
+  local axis, cells = split_size_for(dir)
   if axis == "width" then
-    if size then vim.api.nvim_win_set_width(0, size) end
+    if cells then vim.api.nvim_win_set_width(0, cells) end
     vim.wo.winfixwidth = true
   elseif axis == "height" then
-    if size then vim.api.nvim_win_set_height(0, size) end
+    if cells then vim.api.nvim_win_set_height(0, cells) end
     vim.wo.winfixheight = true
+  end
+
+  -- Record what the window actually ended up as, not what we asked for: Vim
+  -- may adjust it for the layout, and remembering our own request would then
+  -- read as a user resize on the next hide.
+  if axis then
+    state.applied_size = state.applied_size or {}
+    state.applied_size[axis] = axis == "width"
+      and vim.api.nvim_win_get_width(0)
+      or  vim.api.nvim_win_get_height(0)
   end
 end
 

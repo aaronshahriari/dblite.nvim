@@ -616,8 +616,8 @@ PLACEMENT						*dblite-dbout-split*
 
 If dbout is open it moves immediately and re-renders at the new width;
 otherwise the placement takes effect the next time it opens. Either way it is
-remembered — across toggles and across sessions — together with any size you
-resized it to by hand. The sized axis is pinned ('winfixwidth' or
+remembered across toggles and across sessions. A size you resized it to by
+hand is remembered too, but only for the session — see |dblite-dbout-size|. The sized axis is pinned ('winfixwidth' or
 'winfixheight') so opening other windows cannot reclaim it.
 
 `cycle_split` (see |dblite-keymaps|, unmapped by default) flips between a
@@ -642,10 +642,21 @@ configuration mistake. The clamp reserves 'winwidth' columns (or 'winheight'
 rows) plus the separator, and when the screen is too small to split at all the
 size is dropped rather than forced.
 
-A size you resize dbout to by hand is remembered as a fraction as well, so it
-stays proportional across a terminal resize. Remembering 60 columns pins dbout
-to 60 on every screen — most of an 80-column terminal, a third of a wide one —
-and a size measured in one session would be wrong in the next.
+A size you resize dbout to by hand is remembered for the rest of the session,
+so toggling dbout away and back keeps it. It is deliberately not written to
+disk and does not outlive the session: the configured value has to be
+authoritative.
+
+Persisting it did not work. A size on disk outranked `split_size` in the
+user's config, and because it was saved on every toggle rather than only on a
+real resize, one toggle was enough to freeze the configured value for good —
+editing `split_size` then appeared to do nothing. It also leaked between
+connections, so a per-type width (|dblite-config-types|) never took effect
+after the first connection had been used.
+
+A remembered size is held as a fraction of the screen rather than as cells, so
+it stays proportional if the terminal is resized mid-session. `split_size` in
+ui.json is ignored; only the placement is read back.
 
 RENDERING						*dblite-dbout-render*
 

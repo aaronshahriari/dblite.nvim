@@ -32,8 +32,9 @@ local M = {
   -- next toggle and the next session.
   split_dir = "horizontal", -- "right" | "left" | "below" | "above" | "tab"
   split_size = {
-    -- Defaults only: once you resize dbout by hand, that size is remembered
-    -- per axis and restored when you toggle it back.
+    -- Authoritative. A size you resize dbout to by hand is remembered for the
+    -- session, so toggling it away and back keeps it, but it is not persisted:
+    -- a size on disk used to outrank this and could never be overridden.
     width = 80,   -- columns; used for a left/right split. 0 = let nvim decide.
     height = 20,  -- rows;    used for an above/below split. 0 = let nvim decide.
   },

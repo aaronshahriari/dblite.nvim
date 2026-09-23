@@ -74,3 +74,38 @@ eq(size.resolve("width", half, 100), 50, "half of 200 is half of 100 after a res
 eq(size.resolve("width", half, 400), 200, "and half of 400 when the terminal grows")
 
 print("size_spec: ok")
+
+-- ── precedence: config must win unless the user resized ─────────────────────
+--
+-- Regression guard. `split_size` on disk used to outrank `split_size` in the
+-- user's config, and it was written on every toggle rather than only on a real
+-- resize — so a single toggle froze the configured value permanently and
+-- editing the config appeared to do nothing. The size is no longer persisted;
+-- these pin the two halves of that fix that are testable without a real UI.
+
+local root2 = vim.fn.getcwd()
+local ui_path = vim.fn.stdpath("data") .. "/dblite/ui.json"
+vim.fn.mkdir(vim.fn.fnamemodify(ui_path, ":h"), "p")
+
+-- A pre-0.8.1 file carrying a size must not have that size honoured.
+local f = assert(io.open(ui_path, "w"))
+f:write('{"split_dir":{"_default":"right"},"split_size":{"width":0.15}}')
+f:close()
+
+package.loaded["dblite"] = nil
+package.loaded["dblite.config"] = nil
+local d = require("dblite")
+eq(d.get_active_conn(), nil, "no connection active in this spec")
+
+-- Placement is still read back; the size beside it is ignored.
+d.show_result({ columns = { "k" }, column_types = { "s" },
+                rows = { { k = "a" } }, json = "{}", elapsed = 0 }, {})
+d.toggle_dbout()
+
+local g = assert(io.open(ui_path, "r"))
+local saved = vim.json.decode(g:read("*a"))
+g:close()
+eq(saved.split_size, nil, "a rewritten ui.json carries no size")
+eq(saved.split_dir._default, "right", "the placement from disk is kept")
+
+print("size_spec precedence: ok")
