@@ -952,15 +952,11 @@ local function line_oriented()
   return state.active_conn ~= nil and state.active_conn.type == "redis"
 end
 
--- Counts the runnable lines in a line-oriented buffer (blanks and # comments
--- do not count), so a whole-buffer run knows whether it is one command or many.
+-- Counts the commands in a line-oriented buffer, so a whole-buffer run knows
+-- whether it is one command or many. Counts logical commands rather than
+-- lines: a command broken across lines is still one command.
 local function runnable_line_count(bufnr)
-  local n = 0
-  for _, ln in ipairs(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)) do
-    local t = vim.trim(ln)
-    if t ~= "" and t:sub(1, 1) ~= "#" then n = n + 1 end
-  end
-  return n
+  return query_module.logical_count(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false))
 end
 
 local function execute_core(query, script)

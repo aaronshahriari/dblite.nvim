@@ -204,16 +204,110 @@ public final class RedisSource implements Source {
         return Result.of(maxRows > 0 ? truncate(rows, maxRows) : rows);
     }
 
+    /**
+     * One command per line, with continuations.
+     *
+     * Redis has no statement terminator, so a line is a command — but a single
+     * command still has to be breakable across lines, or a JSON.SET with a
+     * document argument is one unreadable line. A command continues when a
+     * quote opened on the line is still open at its end (the newline is part of
+     * the value) or when the line ends with a backslash outside quotes, which
+     * is dropped. Outside quotes `#` starts a comment; inside one it is data.
+     *
+     * The rules are mirrored in dblite.query on the editor side, so what
+     * `run at cursor` sends and what a whole-buffer run splits agree.
+     */
     @Override
     public List<String> split(String script) {
-        List<String> out2 = new ArrayList<>();
+        List<String> statements = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        char quote = 0;
+
         for (String raw : script.split("\r\n|\n|\r")) {
-            String line = raw.trim();
-            if (line.isEmpty()) continue;
-            if (line.startsWith("#")) continue;   // comment
-            out2.add(line);
+            boolean continuing = quote != 0 || current.length() > 0;
+
+            // A blank or comment line only matters when it is not inside a
+            // quoted value, where it is ordinary data.
+            if (quote == 0 && !continuing) {
+                String t = raw.trim();
+                if (t.isEmpty() || t.startsWith("#")) continue;
+            }
+
+            LineScan scan = scanLine(raw, quote);
+            String piece = scan.code;
+            if (scan.continues && quote == 0 && scan.trailingBackslash) {
+                // Drop the backslash; the newline that follows separates the
+                // arguments on its own.
+                piece = piece.substring(0, scan.backslashAt);
+            }
+
+            if (current.length() > 0) current.append('\n');
+            current.append(piece);
+            quote = scan.quote;
+
+            if (!scan.continues) {
+                String done = current.toString().trim();
+                if (!done.isEmpty()) statements.add(done);
+                current.setLength(0);
+            }
         }
-        return out2;
+
+        // An unterminated command at end of input is still worth running: the
+        // server's error is more useful than silently dropping it.
+        String tail = current.toString().trim();
+        if (!tail.isEmpty()) statements.add(tail);
+        return statements;
+    }
+
+    /** Result of scanning one line for quote state and continuation. */
+    private static final class LineScan {
+        char quote;
+        boolean continues;
+        boolean trailingBackslash;
+        int backslashAt;
+        String code;
+    }
+
+    private static LineScan scanLine(String line, char quote) {
+        LineScan r = new LineScan();
+        int n = line.length();
+        int codeEnd = n;
+        int i = 0;
+
+        while (i < n) {
+            char c = line.charAt(i);
+            if (quote == '"') {
+                if (c == '\\') i += 2;
+                else if (c == '"') { quote = 0; i++; }
+                else i++;
+            } else if (quote == '\'') {
+                if (c == '\\' && i + 1 < n && line.charAt(i + 1) == '\'') i += 2;
+                else if (c == '\'') { quote = 0; i++; }
+                else i++;
+            } else {
+                if (c == '#') { codeEnd = i; break; }
+                if (c == '"' || c == '\'') quote = c;
+                i++;
+            }
+        }
+
+        r.quote = quote;
+        r.code = line.substring(0, Math.min(codeEnd, n));
+
+        if (quote != 0) {
+            r.continues = true;
+            return r;
+        }
+
+        // A lone trailing backslash outside quotes continues explicitly.
+        int end = r.code.length();
+        while (end > 0 && Character.isWhitespace(r.code.charAt(end - 1))) end--;
+        if (end > 0 && r.code.charAt(end - 1) == '\\') {
+            r.continues = true;
+            r.trailingBackslash = true;
+            r.backslashAt = end - 1;
+        }
+        return r;
     }
 
     @Override

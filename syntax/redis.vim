@@ -25,8 +25,14 @@ syn match redisCommand /^\s*\zs[A-Za-z][A-Za-z0-9_]*\%(\.[A-Za-z][A-Za-z0-9_]*\)
 " The lookbehind keeps this rule off column one.
 syn match redisFlag /\%(^\s*\)\@<!\<\%(NX\|XX\|GT\|LT\|EX\|PX\|EXAT\|PXAT\|KEEPTTL\|PERSIST\|WITHSCORES\|WITHVALUES\|WITHCOORD\|WITHDIST\|WITHHASH\|LIMIT\|MATCH\|COUNT\|TYPE\|ASC\|DESC\|ALPHA\|BY\|GET\|SET\|STORE\|AGGREGATE\|WEIGHTS\|SUM\|MIN\|MAX\|REV\|BYSCORE\|BYLEX\|LEFT\|RIGHT\|BEFORE\|AFTER\|BLOCK\|STREAMS\|NOMKSTREAM\|MAXLEN\|MINID\|IDLE\|FORCE\|JUSTID\|REPLACE\|ABSTTL\|FREQ\|IDLETIME\|SAMPLES\|RESET\|NOSAVE\|SCHEDULE\|ASYNC\|SYNC\|INDENT\|NEWLINE\|SPACE\|NOESCAPE\|FILTER\|RANK\|MEMORY\|USAGE\|DOCTOR\|SEGFAULT\)\>/
 
-syn region redisString start=/"/ skip=/\\./ end=/"/ oneline
-syn region redisString start=/'/ skip=/\\./ end=/'/ oneline
+" Not `oneline`: a quote left open continues the command onto the next line,
+" which is how a JSON argument is written across several lines.
+syn region redisString start=/"/ skip=/\\./ end=/"/
+syn region redisString start=/'/ skip=/\\./ end=/'/
+
+" A trailing backslash outside quotes continues the command. Highlighting it
+" distinguishes a deliberate continuation from a stray character.
+syn match redisContinuation /\\\s*$/
 
 " A JSONPath argument to the RedisJSON commands: `$`, `$.name`, `$..tags[0]`.
 syn match redisPath /\$[^ \t]*/
@@ -47,5 +53,6 @@ hi def link redisPath    Special
 hi def link redisKey     Identifier
 hi def link redisGlob    Special
 hi def link redisNumber  Number
+hi def link redisContinuation Special
 
 let b:current_syntax = "redis"

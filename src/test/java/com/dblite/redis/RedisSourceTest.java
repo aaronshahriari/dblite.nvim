@@ -499,6 +499,86 @@ class RedisSourceTest {
 
     // --- Script mode --------------------------------------------------------
 
+    /**
+     * A command must be breakable across lines, or a JSON.SET with a document
+     * argument is one unreadable line. The rules mirror dblite.query so that
+     * `run at cursor` and a whole-buffer run agree on where a command ends.
+     */
+    @Test
+    void splitJoinsAnUnterminatedQuoteAcrossLines() throws Exception {
+        try (FakeRedis server = new FakeRedis()) {
+            try (RedisSource src = new RedisSource(server.url(), null, null)) {
+                List<String> stmts = src.split("""
+                    KEYS demo:*
+                    JSON.SET doc:1 $ '{
+                      "name": "widget",
+                      "qty": 2
+                    }'
+                    GET cfg:app
+                    """);
+                assertEquals(3, stmts.size(), stmts.toString());
+                assertEquals("KEYS demo:*", stmts.get(0));
+                assertTrue(stmts.get(1).startsWith("JSON.SET doc:1 $ '{"),
+                    stmts.get(1));
+                // The newlines inside the quoted value are kept: they are part
+                // of the argument, and the tokenizer treats them as data.
+                assertTrue(stmts.get(1).contains("\n"), stmts.get(1));
+                assertTrue(stmts.get(1).endsWith("}'"), stmts.get(1));
+                assertEquals("GET cfg:app", stmts.get(2));
+            }
+        }
+    }
+
+    @Test
+    void splitJoinsATrailingBackslashAndDropsIt() throws Exception {
+        try (FakeRedis server = new FakeRedis()) {
+            try (RedisSource src = new RedisSource(server.url(), null, null)) {
+                List<String> stmts = src.split("""
+                    HSET user:1042 \\
+                      email a@example.com \\
+                      name Aaron
+                    GET other
+                    """);
+                assertEquals(2, stmts.size(), stmts.toString());
+                assertFalse(stmts.get(0).contains("\\"),
+                    "the continuation backslash must be dropped: " + stmts.get(0));
+                // Tokenising the joined command must recover the real arguments.
+                assertEquals(
+                    List.of("HSET", "user:1042", "email", "a@example.com", "name", "Aaron"),
+                    Resp.tokenize(stmts.get(0)));
+                assertEquals("GET other", stmts.get(1));
+            }
+        }
+    }
+
+    /** A backslash inside a comment is not a continuation. */
+    @Test
+    void splitDoesNotContinueFromInsideAComment() throws Exception {
+        try (FakeRedis server = new FakeRedis()) {
+            try (RedisSource src = new RedisSource(server.url(), null, null)) {
+                List<String> stmts = src.split("""
+                    # a trailing backslash in prose \\
+                    GET one
+                    GET two
+                    """);
+                assertEquals(List.of("GET one", "GET two"), stmts);
+            }
+        }
+    }
+
+    /** A `#` inside a quoted value is data, not the start of a comment. */
+    @Test
+    void splitKeepsAHashInsideAQuotedValue() throws Exception {
+        try (FakeRedis server = new FakeRedis()) {
+            try (RedisSource src = new RedisSource(server.url(), null, null)) {
+                List<String> stmts = src.split("SET colour \"#ff0000\"\nGET colour");
+                assertEquals(2, stmts.size(), stmts.toString());
+                assertEquals(List.of("SET", "colour", "#ff0000"),
+                    Resp.tokenize(stmts.get(0)));
+            }
+        }
+    }
+
     @Test
     void splitTakesOneCommandPerLineAndDropsComments() throws Exception {
         try (FakeRedis server = new FakeRedis()) {

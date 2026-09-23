@@ -395,6 +395,34 @@ commands you use in a scratch buffer and run the one under the cursor.
 Because a line is a statement, no blank lines are needed between commands and
 `run at` never picks up the line below. On a SQL connection the usual
 terminator-delimited rules apply instead.
+
+MULTILINE COMMANDS					*dblite-redis-multiline*
+
+A document argument on one line is unreadable, so a command continues onto the
+next line in two cases.
+
+A quote left open at the end of a line continues it, and the newline is part of
+the value — which is how a JSON argument spans lines: >
+	JSON.SET doc:1 $ '{
+	  "name": "widget",
+	  "qty": 2
+	}'
+<
+A trailing backslash outside quotes also continues, and is dropped: >
+	HSET user:1042 \
+	  email a@example.com \
+	  name Aaron
+<
+`:Dblite run at` from any line of a continued command runs all of it, and a
+range (`:'<,'>Dblite run bulk`) grows to whole commands rather than cutting one
+in half.
+
+Outside quotes `#` starts a comment, and a trailing comment is removed before
+the command is sent. Inside a quoted value both are ordinary data, so
+`SET colour "#ff0000"` works and a `#` inside multi-line JSON is not a comment.
+
+The same rules apply to a whole-buffer run (|dblite-redis-script|), so what
+`run at` sends and what a script run splits always agree.
 FINDING KEYS						*dblite-redis-keys*
 
 `KEYS <pattern>` is served by a full SCAN cursor loop rather than the real
@@ -464,7 +492,7 @@ SCRIPTS							*dblite-redis-script*
 
 In script mode (`:Dblite run script`) each line is one command and lines
 beginning with `#` are comments, so a purge or cache-warm routine can live in a
-file you commit.
+file you commit. A command may span lines; see |dblite-redis-multiline|.
 
 WRITING							*dblite-redis-write*
 
