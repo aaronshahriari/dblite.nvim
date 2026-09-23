@@ -43,6 +43,28 @@ line two
 line three'
 r SET demo:note:spaced 'a value with spaces, and a comma'
 
+# --- JSON documents ------------------------------------------------------
+# RedisJSON's JSON.GET returns a bulk string of JSON, which is the same reply
+# shape as GET on a string holding JSON. Without the module loaded these keys
+# exercise the identical rendering path, so `GET demo:json:order` here behaves
+# as `JSON.GET order:1234` does on a server that has it.
+r SET demo:json:order '{"id":4821,"customer":"team-x","status":"shipped","total":129.95,"items":[{"sku":"WIDGET-1","qty":2,"price":49.99},{"sku":"GIZMO-7","qty":1,"price":29.97}],"address":{"line1":"1 Example Way","city":"Austin","region":"TX","postal":"78701"},"meta":{"created":"2026-01-04T10:22:00Z","updated":"2026-02-11T08:03:12Z","flags":{"gift":false,"expedited":true}}}'
+
+# Deeply nested: shows the indenting actually doing something.
+r SET demo:json:deep '{"a":{"b":{"c":{"d":{"e":{"f":"bottom","g":[1,2,{"h":true}]}}}}}}'
+
+# A top-level array, which is what `JSON.GET key $` returns.
+r SET demo:json:path '[{"name":"widget","qty":2}]'
+
+# A single scalar wrapped in an array: `JSON.GET key $.count`.
+r SET demo:json:scalar '[42]'
+
+# An empty object and an empty array — both still documents.
+r SET demo:json:empty '{}'
+
+# Not JSON, despite the braces: must stay a grid cell, not be mis-detected.
+r SET demo:json:broken '{"a": 1, "b":'
+
 # --- collections ----------------------------------------------------------
 r RPUSH demo:queue:jobs a b c d
 r SADD demo:tags:active alpha beta gamma
