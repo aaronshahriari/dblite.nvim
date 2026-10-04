@@ -248,16 +248,43 @@ local function effective_max_col_width()
   return opt("max_col_width") or 0
 end
 
+-- A cell is measured in screen columns, never in bytes. A title with a curly
+-- quote in it is three bytes per quote but one column wide, so padding it to a
+-- byte count leaves its row's `|` short of every other row's. Pure ASCII is the
+-- common case and `#s` is exact there, so only the rest pays for strdisplaywidth.
+local function dwidth(s)
+  if s:find("[\128-\255]") then return vim.fn.strdisplaywidth(s) end
+  return #s
+end
+
+-- The text a value actually renders as: control characters are escaped, so
+-- they have to be escaped before anything measures the value too.
+local function display_text(value)
+  local s = (value == nil or value == vim.NIL) and "" or tostring(value)
+  return (s:gsub("\r\n", "\\n"):gsub("\n", "\\n"):gsub("\r", "\\r"))
+end
+
+-- Cut `s` to at most `max` screen columns, whole characters only, ending in an
+-- ellipsis that is itself part of the budget. A double-width character that
+-- would straddle the limit is dropped rather than halved, so the result can
+-- come back one column short — `cell` pads that back out.
+local function truncate(s, max)
+  if max <= 0 or dwidth(s) <= max then return s end
+  local budget, out, w = max - 1, {}, 0
+  for i = 0, vim.fn.strchars(s) - 1 do
+    local ch = vim.fn.strcharpart(s, i, 1)
+    local cw = vim.fn.strdisplaywidth(ch)
+    if w + cw > budget then break end
+    out[#out + 1] = ch
+    w = w + cw
+  end
+  return table.concat(out) .. "…"
+end
+
 local function cell(value, width)
-  local s = value == vim.NIL and "" or tostring(value)
-  s = s:gsub("\r\n", "\\n"):gsub("\n", "\\n"):gsub("\r", "\\r")
-  local max = effective_max_col_width()
-  if max > 0 and #s > max then
-    s = s:sub(1, max - 1) .. "…"
-  end
-  if #s < width then
-    s = s .. string.rep(" ", width - #s)
-  end
+  local s = truncate(display_text(value), effective_max_col_width())
+  local pad = width - dwidth(s)
+  if pad > 0 then s = s .. string.rep(" ", pad) end
   return s
 end
 
@@ -265,14 +292,13 @@ local function compute_widths(rows, columns)
   local widths = {}
   local max = effective_max_col_width()
   for _, col in ipairs(columns) do
-    widths[col] = #col
+    widths[col] = dwidth(tostring(col))
   end
   for _, row in ipairs(rows) do
     for _, col in ipairs(columns) do
-      local v = row[col]
-      local s = v == vim.NIL and "" or tostring(v)
-      if max > 0 and #s > max then s = s:sub(1, max) end
-      if #s > widths[col] then widths[col] = #s end
+      local w = dwidth(display_text(row[col]))
+      if max > 0 and w > max then w = max end
+      if w > widths[col] then widths[col] = w end
     end
   end
   return widths
@@ -430,7 +456,7 @@ local function render_page()
   for i, col in ipairs(state.columns) do
     local w = state.widths[col]
     if types_visible and state.column_types[i] and state.column_types[i] ~= "" then
-      local header_w = #col + 2 + #state.column_types[i] + 1  -- "COL [TYPE]"
+      local header_w = dwidth(col .. " [" .. state.column_types[i] .. "]")
       if header_w > w then w = header_w end
     end
     eff_widths[col] = w
@@ -443,9 +469,12 @@ local function render_page()
     local col_start = #header_line
     if types_visible and state.column_types[i] and state.column_types[i] ~= "" then
       local type_str = " [" .. state.column_types[i] .. "]"
-      header_line = header_line .. cell(col .. type_str, eff_widths[col])
+      -- Extmarks take byte offsets, so the annotation is located in the text
+      -- that was really written: truncation may have eaten part of it.
+      local rendered = cell(col .. type_str, eff_widths[col])
+      header_line = header_line .. rendered
       local mark_start = col_start + #col
-      local mark_end = math.min(col_start + #col + #type_str, col_start + eff_widths[col])
+      local mark_end = col_start + #(rendered:gsub("%s+$", ""))
       if mark_start < mark_end then
         table.insert(type_marks, { col = mark_start, end_col = mark_end })
       end
@@ -2109,17 +2138,18 @@ function M.inspect(format)
       vim.notify("dblite: no query result to inspect", vim.log.levels.WARN)
       return
     end
+    -- Untruncated, but aligned the same way the grid is: by screen columns.
     local widths = {}
-    for _, col in ipairs(state.columns) do widths[col] = #tostring(col) end
+    for _, col in ipairs(state.columns) do widths[col] = dwidth(tostring(col)) end
     for _, row in ipairs(page_rows) do
       for _, col in ipairs(state.columns) do
-        local s = (row[col] == nil or row[col] == vim.NIL) and "" or tostring(row[col])
-        if #s > widths[col] then widths[col] = #s end
+        local w = dwidth(display_text(row[col]))
+        if w > widths[col] then widths[col] = w end
       end
     end
     local function pad(val, w)
-      local s = (val == nil or val == vim.NIL) and "" or tostring(val)
-      return s .. string.rep(" ", w - #s)
+      local s = display_text(val)
+      return s .. string.rep(" ", math.max(0, w - dwidth(s)))
     end
     local headers, seps = {}, {}
     for _, col in ipairs(state.columns) do
