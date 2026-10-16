@@ -143,6 +143,9 @@ function M.update(id, fields)
   for i, c in ipairs(conns) do
     if c.id == id then
       for k, v in pairs(fields) do c[k] = v end
+      -- "sql" is the absence of a scheme and is stored as absence, so turning
+      -- Kerberos back off has to clear the field rather than record a default.
+      if c.auth == "sql" then c.auth = nil end
       validate(c)
       if c.type ~= "sqlite" then
         local default_port = (c.type == "sqlserver") and 1433
@@ -253,7 +256,7 @@ end
 
 -- Parses a URI into connection fields.
 -- Oracle:    oracle://user[:password]@host[:port]/service
--- SQL Server: sqlserver://user[:password]@host[:port]/database
+-- SQL Server: sqlserver://user[:password]@host[:port]/database[?auth=kerberos]
 -- SQLite:    sqlite:///absolute/path/to/database.db
 -- Redis:     redis://[[user][:password]@]host[:port][/db]  (rediss:// for TLS)
 -- Returns fields table on success, or nil + error string on failure.
@@ -284,12 +287,30 @@ function M.parse_uri(uri)
     return nil, "URI must start with oracle://, sqlserver://, sqlite://, or redis://"
   end
 
+  -- `?auth=kerberos` authenticates with the caller's ticket, so the URI carries
+  -- no username and no password to leave the userinfo half empty.
+  local auth = "sql"
+  local query = rest:match("%?([^?]*)$")
+  if query then
+    rest = rest:sub(1, #rest - #query - 1)
+    local key, value = query:match("^([%w_]+)=(.+)$")
+    if key ~= "auth" then return nil, "URI query must be ?auth=<sql|kerberos>" end
+    auth = value:lower()
+    if auth ~= "sql" and auth ~= "kerberos" then
+      return nil, "auth must be 'sql' or 'kerberos'"
+    end
+    if auth == "kerberos" and db_type ~= "sqlserver" then
+      return nil, "auth=kerberos is only supported for SQL Server"
+    end
+  end
+  local kerberos = auth == "kerberos"
+
   local at = rest:find("@")
-  if not at then
+  if not at and not kerberos then
     return nil, "URI must contain @ separator"
   end
-  local userinfo = rest:sub(1, at - 1)
-  local hostinfo  = rest:sub(at + 1)
+  local userinfo = at and rest:sub(1, at - 1) or ""
+  local hostinfo = at and rest:sub(at + 1) or rest
 
   local user, password
   local uc = userinfo:find(":")
@@ -320,11 +341,12 @@ function M.parse_uri(uri)
     port = default_port
   end
 
-  if user   == "" then return nil, "URI is missing user" end
+  if user == "" and not kerberos then return nil, "URI is missing user" end
   if host   == "" then return nil, "URI is missing host" end
   if db_val == "" then return nil, "URI is missing " .. (db_type == "sqlserver" and "database" or "service") end
 
   local fields = { type = db_type, host = host, port = port, user = user, password = password }
+  if kerberos then fields.auth = "kerberos" end
   if db_type == "sqlserver" then
     fields.database = db_val
   else

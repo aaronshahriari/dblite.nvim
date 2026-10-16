@@ -152,7 +152,7 @@ Name arguments support tab-completion.
 
 ```
 oracle://user[:password]@host[:port]/service
-sqlserver://user[:password]@host[:port]/database
+sqlserver://user[:password]@host[:port]/database[?auth=kerberos]
 sqlite:///absolute/path.db
 redis://[[user][:password]@]host[:port][/db]     # rediss:// for TLS
 ```
@@ -160,6 +160,21 @@ redis://[[user][:password]@]host[:port][/db]     # rediss:// for TLS
 SQLite paths must point to an existing regular file. `:memory:` is unsupported because each command starts a new process and database connection. Run `:DbliteAddConn` without an argument to enter a URI interactively; leave that prompt blank for field-by-field setup (SQLite asks for type and database path). URI setup still prompts for a connection name.
 
 SQL Server connections use `encrypt=true;trustServerCertificate=true` for broad compatibility with local dev and Azure SQL.
+
+**SQL Server with Kerberos** — add `?auth=kerberos` to authenticate with the ticket already in your cache instead of a username and password:
+
+```vim
+:DbliteAddConn sqlserver://db.corp.com:36362/KnowledgeBase?auth=kerberos
+```
+
+The field-by-field setup asks `Auth [sql/kerberos]` for SQL Server and skips the credential prompts when you choose Kerberos; `:DbliteEditConn` can switch an existing connection either way. dblite adds `integratedSecurity=true;authenticationScheme=JavaKerberos` to the JDBC URL and passes the binary no credentials at all — everything comes from the ticket, so `klist` must show a valid TGT before a query will run.
+
+Java reads the ticket from a *file* cache. If `klist` shows one but dblite reports `Unable to obtain Principal Name` or `no valid credentials`, the ticket is in a cache type Java cannot read (macOS keeps one in its own credential store by default); point it at a file cache first:
+
+```sh
+export KRB5CCNAME=FILE:/tmp/krb5cc_$(id -u)
+kinit you@REALM.COM
+```
 
 Redis needs only a host — auth is optional, and the database is an index (default `0`) rather than a name. Credentials travel in the environment rather than in the URL, so nothing has to be percent-encoded once saved; a password in a URI *is* percent-decoded when you paste it (`redis://:p%40ss@host` → `p@ss`). Both a bare password and an ACL `user:password` pair work. `rediss://` uses your system truststore, so a managed Redis with a public CA works with no extra setup.
 

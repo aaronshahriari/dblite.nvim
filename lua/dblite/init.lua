@@ -1677,15 +1677,21 @@ local function edit_conn_by_name(name)
     name = prompt("Name", conn.name),
     host = prompt("Host", conn.host),
     port = tonumber(prompt("Port", conn.port or default_port)),
-    user = prompt("User", conn.user),
   }
   if conn.type == "sqlserver" then
     updates.database = db_val
+    local a = prompt("Auth (sql/kerberos)", conn.auth or "sql"):lower()
+    updates.auth = a:sub(1, 1) == "k" and "kerberos" or "sql"
   else
     updates.service = db_val
   end
-  local pw = vim.fn.inputsecret("Password (leave blank to keep): ")
-  if pw ~= "" then updates.password = pw end
+  -- A Kerberos connection has neither to re-ask for; any credentials left from
+  -- an earlier scheme stay on disk, so switching back restores them.
+  if updates.auth ~= "kerberos" then
+    updates.user = prompt("User", conn.user)
+    local pw = vim.fn.inputsecret("Password (leave blank to keep): ")
+    if pw ~= "" then updates.password = pw end
+  end
 
   local ok, result = pcall(connections.update, conn.id, updates)
   if not ok then
@@ -1787,21 +1793,31 @@ vim.api.nvim_create_user_command("DbliteAddConn", function(opts)
       }
     else
       local default_port = type_s == "sqlserver" and "1433" or "1521"
+      -- Kerberos is asked first: it authenticates with the ticket already in
+      -- the cache, so there is no username or password left to ask for.
+      local kerberos = false
+      if type_s == "sqlserver" then
+        kerberos = vim.fn.input("Auth [sql/kerberos]: "):lower():sub(1, 1) == "k"
+      end
       local host = vim.fn.input("Host: ")
       if host == "" then return end
       local port_s   = vim.fn.input("Port [" .. default_port .. "]: ")
       local db_label = type_s == "sqlserver" and "Database" or "Service"
       local db_val   = vim.fn.input(db_label .. ": ")
       if db_val == "" then return end
-      local user     = vim.fn.input("User: ")
-      if user == "" then return end
-      local password = vim.fn.inputsecret("Password (or $ENV_VAR): ")
+      local user, password = "", ""
+      if not kerberos then
+        user = vim.fn.input("User: ")
+        if user == "" then return end
+        password = vim.fn.inputsecret("Password (or $ENV_VAR): ")
+      end
       fields = {
         type     = type_s,
         host     = host,
         port     = tonumber(port_s ~= "" and port_s or default_port),
         user     = user,
         password = password,
+        auth     = kerberos and "kerberos" or nil,
       }
       if type_s == "sqlserver" then
         fields.database = db_val
@@ -1810,8 +1826,10 @@ vim.api.nvim_create_user_command("DbliteAddConn", function(opts)
       end
     end
   else
-    -- URI path: password may be missing — give the user a chance to set it
-    if fields.type ~= "sqlite" and fields.type ~= "redis" and (fields.password or "") == "" then
+    -- URI path: password may be missing — give the user a chance to set it.
+    -- Kerberos has none to set, so it is not asked.
+    if fields.type ~= "sqlite" and fields.type ~= "redis"
+      and fields.auth ~= "kerberos" and (fields.password or "") == "" then
       fields.password = vim.fn.inputsecret("Password (or $ENV_VAR, leave blank to set later): ")
     end
   end
@@ -1847,9 +1865,12 @@ vim.api.nvim_create_user_command("DbliteListConns", function()
     else
       local db_val  = (c.type == "sqlserver") and c.database or c.service
       local default_port = (c.type == "sqlserver") and 1433 or 1521
+      -- Kerberos stands where the username would: the listing should say how
+      -- a connection authenticates, and there is no user to print.
+      local who = c.auth == "kerberos" and "kerberos" or c.user
       table.insert(lines, string.format(
         "  %-20s  [%-10s]  %s@%s:%d/%s%s",
-        c.name, c.type or "oracle", c.user, c.host, c.port or default_port, db_val or "?", active
+        c.name, c.type or "oracle", who, c.host, c.port or default_port, db_val or "?", active
       ))
     end
   end

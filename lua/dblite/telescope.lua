@@ -36,8 +36,11 @@ local function target_str(c)
   end
   local db_val       = (c.type == "sqlserver") and c.database or c.service
   local default_port = (c.type == "sqlserver") and 1433 or 1521
+  -- Kerberos stands where the username would: there is none to print, and an
+  -- entry that authenticates from a ticket should say so in the list.
   return string.format("%s@%s:%d/%s",
-    c.user or "", c.host or "", c.port or default_port, db_val or "?")
+    c.auth == "kerberos" and "kerberos" or (c.user or ""),
+    c.host or "", c.port or default_port, db_val or "?")
 end
 
 -- Builds the detail lines shown in the preview pane. The password is masked

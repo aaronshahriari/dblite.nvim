@@ -131,7 +131,7 @@ take a connection name support tab-completion.
 URI formats ~
 >
 	oracle://user[:password]@host[:port]/service
-	sqlserver://user[:password]@host[:port]/database
+	sqlserver://user[:password]@host[:port]/database[?auth=kerberos]
 	sqlite:///absolute/path.db
 	redis://[[user][:password]@]host[:port][/db]
 	rediss://[[user][:password]@]host[:port][/db]      (TLS)
@@ -140,6 +140,28 @@ Port defaults to 1521 for Oracle, 1433 for SQL Server and 6379 for Redis when
 omitted.
 SQL Server connections use `encrypt=true;trustServerCertificate=true` for
 broad compatibility with local dev and Azure SQL.
+
+                                                        *dblite-kerberos*
+SQL Server can authenticate with the Kerberos ticket already in your cache
+instead of a username and password. Add `?auth=kerberos` to the URI: >
+
+	:DbliteAddConn sqlserver://db.corp.com:36362/KnowledgeBase?auth=kerberos
+<
+Field-by-field setup asks `Auth [sql/kerberos]` for SQL Server and skips the
+credential prompts when Kerberos is chosen; |:DbliteEditConn| switches an
+existing connection either way. dblite appends
+`integratedSecurity=true;authenticationScheme=JavaKerberos` to the JDBC URL and
+passes the helper binary no credentials, so `klist` must show a valid TGT
+before a query will run.
+
+Java reads the ticket from a file cache. If `klist` shows one but dblite
+reports `Unable to obtain Principal Name` or `no valid credentials`, the ticket
+lives in a cache type Java cannot read — macOS keeps one in its own credential
+store by default. Point it at a file cache first: >
+
+	export KRB5CCNAME=FILE:/tmp/krb5cc_$(id -u)
+	kinit you@REALM.COM
+<
 
 SQLite paths must point to an existing regular file. `:memory:` is unsupported
 because each command starts a new process and database connection.
