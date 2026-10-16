@@ -1,0 +1,9 @@
+{
+  "resources": { "includes": [] },
+  "bundles": [
+    { "name": "sun.security.util.Resources" },
+    { "name": "sun.security.util.resources.security" },
+    { "name": "sun.security.util.AuthResources" },
+    { "name": "com.microsoft.sqlserver.jdbc.SQLServerResource" }
+  ]
+}

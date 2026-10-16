@@ -1,0 +1,24 @@
+[
+  {
+    "name": "sun.security.provider.ConfigFile",
+    "methods": [{ "name": "<init>", "parameterTypes": [] }]
+  },
+  {
+    "name": "com.sun.security.auth.module.Krb5LoginModule",
+    "allPublicConstructors": true,
+    "allPublicMethods": true
+  },
+  {
+    "name": "sun.security.jgss.SunProvider",
+    "allPublicConstructors": true,
+    "allPublicMethods": true
+  },
+  {
+    "name": "sun.security.jgss.krb5.Krb5MechFactory",
+    "allPublicConstructors": true
+  },
+  {
+    "name": "sun.security.jgss.spnego.SpNegoMechFactory",
+    "allPublicConstructors": true
+  }
+]
