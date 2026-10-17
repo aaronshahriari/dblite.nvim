@@ -14,7 +14,13 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <main.class>com.dblite.App</main.class>
         <ojdbc.version>23.8.0.25.04</ojdbc.version>
+        <mssql.jdbc.version>12.10.1.jre11</mssql.jdbc.version>
         <sqlite.jdbc.version>3.53.4.0</sqlite.jdbc.version>
+        <!-- Only the native build needs this, and only to compile the Kerberos
+             feature against GraalVM's builder API. The newest release on Maven
+             Central is older than the JDK the image is built with; the handful
+             of entry points the feature calls are the same in both. -->
+        <svm.version>24.2.1</svm.version>
         <junit.version>6.1.3</junit.version>
         <native.maven.plugin.version>0.10.3</native.maven.plugin.version>
     </properties>
@@ -28,7 +34,7 @@
         <dependency>
             <groupId>com.microsoft.sqlserver</groupId>
             <artifactId>mssql-jdbc</artifactId>
-            <version>12.8.1.jre11</version>
+            <version>${mssql.jdbc.version}</version>
         </dependency>
         <dependency>
             <groupId>org.xerial</groupId>
@@ -40,6 +46,14 @@
             <artifactId>junit-jupiter</artifactId>
             <version>${junit.version}</version>
             <scope>test</scope>
+        </dependency>
+        <!-- The image builder supplies this at build time and the running binary
+             never sees it, so it is compiled against and nothing more. -->
+        <dependency>
+            <groupId>org.graalvm.nativeimage</groupId>
+            <artifactId>svm</artifactId>
+            <version>${svm.version}</version>
+            <scope>provided</scope>
         </dependency>
     </dependencies>
 
@@ -89,6 +103,23 @@
                             <buildArgs>
                                 <buildArg>--no-fallback</buildArg>
                                 <buildArg>-H:+ReportExceptionStackTraces</buildArg>
+                                <!-- SQL Server hands back text in the server's
+                                     collation, and a database on
+                                     SQL_Latin1_General_CP1_CI_AS needs Cp1252,
+                                     which an image otherwise leaves out. -->
+                                <buildArg>-H:+AddAllCharsets</buildArg>
+                                <!-- sqlite-jdbc loads its own native library;
+                                     without this the JDK prints four lines of
+                                     restricted-method warnings before every
+                                     result. -->
+                                <buildArg>--enable-native-access=ALL-UNNAMED</buildArg>
+                                <!-- macOS Kerberos: see MacosKerberosFeature.
+                                     The exports are what lets a feature on the
+                                     classpath reach the builder's internals. -->
+                                <buildArg>--features=com.dblite.nativeimage.MacosKerberosFeature</buildArg>
+                                <buildArg>-J--add-exports=org.graalvm.nativeimage.builder/com.oracle.svm.core.jdk=ALL-UNNAMED</buildArg>
+                                <buildArg>-J--add-exports=org.graalvm.nativeimage.builder/com.oracle.svm.hosted=ALL-UNNAMED</buildArg>
+                                <buildArg>-J--add-exports=org.graalvm.nativeimage.builder/com.oracle.svm.hosted.c=ALL-UNNAMED</buildArg>
                             </buildArgs>
                         </configuration>
                     </plugin>

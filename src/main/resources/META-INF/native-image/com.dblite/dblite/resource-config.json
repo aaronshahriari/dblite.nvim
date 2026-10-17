@@ -4,6 +4,7 @@
     { "name": "sun.security.util.Resources" },
     { "name": "sun.security.util.resources.security" },
     { "name": "sun.security.util.AuthResources" },
+    { "name": "sun.security.util.resources.auth" },
     { "name": "com.microsoft.sqlserver.jdbc.SQLServerResource" }
   ]
 }

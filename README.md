@@ -169,7 +169,7 @@ SQL Server connections use `encrypt=true;trustServerCertificate=true` for broad 
 
 The field-by-field setup asks `Auth [sql/kerberos]` for SQL Server and skips the credential prompts when you choose Kerberos; `:DbliteEditConn` can switch an existing connection either way. dblite adds `integratedSecurity=true;authenticationScheme=JavaKerberos` to the JDBC URL and passes the binary no credentials at all — everything comes from the ticket, so `klist` must show a valid TGT before a query will run.
 
-Java reads the ticket from a *file* cache. If `klist` shows one but dblite reports `Unable to obtain Principal Name` or `no valid credentials`, the ticket is in a cache type Java cannot read (macOS keeps one in its own credential store by default); point it at a file cache first:
+On macOS the ticket usually lives in the system credential store rather than in a file, and the binary reads it from there directly — `kinit` and go, with nothing to configure. If `klist` shows a valid ticket but dblite still reports `Unable to obtain Principal Name` or `no valid credentials`, fall back to a file cache:
 
 ```sh
 export KRB5CCNAME=FILE:/tmp/krb5cc_$(id -u)

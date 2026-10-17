@@ -154,10 +154,11 @@ existing connection either way. dblite appends
 passes the helper binary no credentials, so `klist` must show a valid TGT
 before a query will run.
 
-Java reads the ticket from a file cache. If `klist` shows one but dblite
-reports `Unable to obtain Principal Name` or `no valid credentials`, the ticket
-lives in a cache type Java cannot read — macOS keeps one in its own credential
-store by default. Point it at a file cache first: >
+On macOS the ticket usually lives in the system credential store rather than in
+a file, and the binary reads it from there directly: `kinit` and go, with
+nothing to configure. If `klist` shows a valid ticket but dblite still reports
+`Unable to obtain Principal Name` or `no valid credentials`, fall back to a
+file cache: >
 
 	export KRB5CCNAME=FILE:/tmp/krb5cc_$(id -u)
 	kinit you@REALM.COM

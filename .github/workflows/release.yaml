@@ -25,9 +25,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 25, not 21: the Kerberos feature links a static JDK library into the
+      # image, and this is the version that pairing was verified against.
       - uses: graalvm/setup-graalvm@v1
         with:
-          java-version: '21'
+          java-version: '25'
           distribution: 'graalvm'
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -42,10 +44,21 @@ jobs:
             sleep 1
           done
 
+      # Linking is itself the Kerberos test on macOS: the image pulls in the
+      # JDK's static libosxkrb5 and the Kerberos framework, so a missing archive
+      # fails the build rather than shipping a binary that cannot read a ticket.
       - name: Build native binary
-        run: mvn -q clean package -Pnative
+        shell: bash
+        run: mvn -q clean package -Pnative 2>&1 | tee build.log
         env:
           DBLITE_REDIS_URL: ${{ runner.os == 'Linux' && 'redis://127.0.0.1:6399/0' || '' }}
+
+      # What linking cannot catch is the feature quietly not applying at all —
+      # that builds clean and ships a binary with no credential cache bridge.
+      - name: Verify the Kerberos feature applied
+        if: runner.os == 'macOS'
+        shell: bash
+        run: grep -q 'com.dblite.nativeimage.MacosKerberosFeature' build.log
 
       - name: Smoke test SQLite
         shell: bash
