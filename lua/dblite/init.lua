@@ -1558,6 +1558,13 @@ end, {})
 --                 from source if none matches the platform.
 -- :DbliteBuild! — skip the download and always build from source (use when the
 --                 local source is ahead of the latest release).
+-- :DbliteVersion — which plugin, and which binary is actually installed
+vim.api.nvim_create_user_command("DbliteVersion", function()
+  vim.notify(
+    table.concat(require("dblite.version").report(_plugin_root, config.binary), "\n"),
+    vim.log.levels.INFO)
+end, {})
+
 vim.api.nvim_create_user_command("DbliteBuild", function(opts)
   require("dblite.download").download_or_build({ force_build = opts.bang })
   -- Re-resolve binary path in case it was just created
@@ -2626,6 +2633,7 @@ do
       local path = #a >= 3 and table.concat(vim.list_slice(a, 3), " ") or nil
       M.export(a[2], path)
     end,
+    version       = function() vim.cmd("DbliteVersion") end,
     binds         = function() M.edit_binds() end,
     load          = function() M.load() end,
     split         = function(a) M.set_split_dir(a[2]) end,
@@ -2637,7 +2645,7 @@ do
     local n = #tokens
     if n == 2 then
       return vim.tbl_filter(function(k) return k:sub(1, #arg_lead) == arg_lead end,
-        { "run", "watch", "jobs", "toggle", "conn", "build", "inspect", "export", "binds", "load", "split", "output" })
+        { "run", "watch", "jobs", "toggle", "conn", "build", "version", "inspect", "export", "binds", "load", "split", "output" })
     elseif n == 3 then
       local sub = tokens[2]
       local opts = {

@@ -999,6 +999,15 @@ Individual commands ~
 				source (use when the local source is ahead
 				of the latest release, e.g. after changing
 				the Java).
+							*:DbliteVersion*
+:DbliteVersion			Report the plugin version and the version of
+				the binary that is actually installed, with
+				the path to it. Warns when the binary is the
+				older of the two. The binary carries no
+				version of its own, so dblite records one
+				when it installs it; a binary that predates
+				that reports `unknown` until the next
+				|:DbliteBuild|.
 							*:DbliteLoad*
 :DbliteLoad			Load a CSV into a table from a SQL*Loader-style
 				LOAD DATA control block in the current buffer,

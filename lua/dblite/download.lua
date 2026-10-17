@@ -1,3 +1,5 @@
+local version = require("dblite.version")
+
 local M = {}
 
 local function plugin_root()
@@ -53,12 +55,12 @@ local function try_download(root)
   local platform, err = detect_platform()
   if not platform then return err end
 
-  local version, verr = latest_release_tag()
-  if not version then return verr end
+  local ver, verr = latest_release_tag()
+  if not ver then return verr end
 
   local dest     = root .. "/bin/dblite"
   local dest_tmp = dest .. ".tmp"
-  local url      = ("https://github.com/%s/releases/download/%s/dblite-%s"):format(REPO, version, platform)
+  local url      = ("https://github.com/%s/releases/download/%s/dblite-%s"):format(REPO, ver, platform)
 
   vim.fn.mkdir(root .. "/bin", "p")
 
@@ -80,6 +82,8 @@ local function try_download(root)
     return "rename failed: " .. (rename_err or "")
   end
 
+  -- The binary cannot be asked what it is later, so note it now.
+  version.record(root, { version = version.normalize(ver), source = "release" })
   return nil
 end
 
@@ -96,6 +100,10 @@ local function try_build(root)
   if r.code ~= 0 then
     return "build failed:\n" .. (r.stderr or "")
   end
+
+  -- A source build is whatever the working tree says it is, which is not
+  -- necessarily a released version — the record says so.
+  version.record(root, { version = version.plugin(root) or "unknown", source = "build" })
   return nil
 end
 

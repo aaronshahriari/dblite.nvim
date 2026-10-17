@@ -108,6 +108,17 @@ git clone https://github.com/aaronshahriari/dblite.nvim
 
 For a manual install, add the directory to `runtimepath`, call `require('dblite').setup()`, and run `:DbliteBuild`.
 
+`:Dblite version` (or `:DbliteVersion`) reports the plugin version alongside the binary that is actually installed, and says so when the binary is the older of the two:
+
+```
+dblite 0.8.3
+  binary   0.8.2  (release, 2026-10-16)
+  path     ~/.local/share/nvim/lazy/dblite.nvim/bin/dblite
+  ! binary 0.8.2 is older than plugin 0.8.3 — run :DbliteBuild to update it
+```
+
+The binary carries no version of its own, so dblite records one when it installs it. A binary that predates this reports `unknown` until the next `:DbliteBuild`.
+
 </details>
 
 ## Quick start
@@ -194,6 +205,7 @@ Redis needs only a host — auth is optional, and the database is an index (defa
 | `:Dblite watch file [spec]` | Same, but watch the whole buffer |
 | `:Dblite watch stop` | Stop every running watch |
 | `:Dblite jobs` | Toggle the activity panel (watches + background exports) |
+| `:Dblite version` | Report the plugin version and the installed binary's |
 | `:Dblite load` | Load a CSV into a table from a `LOAD DATA` control block (preview, then commit) |
 
 Trailing semicolons are stripped automatically. The legacy `:DbliteRun`, `:DbliteRunAt`, and `:DbliteToggleOut` commands remain as aliases. Running from a different tab moves the dbout split to that tab.
